@@ -22,7 +22,8 @@ db_connection = None # Global connection for this script
 
 def fetch_historical_data(start_dt):
     """Fetches and inserts historical data from a start date until now."""
-    print("\n--- Starting Historical Data Backfill ---")
+    log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"\n[{log_time}] --- Starting Historical Data Backfill ---")
     end_dt = datetime.now(timezone.utc)
     current_dt = start_dt
 
@@ -32,16 +33,19 @@ def fetch_historical_data(start_dt):
             'startTime': int(current_dt.timestamp() * 1000), 'limit': 1000
         }
         try:
-            print(f"⬇️  Fetching records from {current_dt.strftime('%Y-%m-%d %H:%M:%S')}...")
+            log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"[{log_time}] ⬇️  Fetching records from {current_dt.strftime('%Y-%m-%d %H:%M:%S')}...")
             response = requests.get(BINANCE_API_URL, params=params)
             response.raise_for_status()
             data = response.json()
             
             if not data:
-                print("   No more historical data to fetch.")
+                log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                print(f"[{log_time}]    No more historical data to fetch.")
                 break
 
-            print(f"   ✅ Fetched {len(data)} records.")
+            log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"[{log_time}]    ✅ Fetched {len(data)} records.")
             db_utils.insert_batch_data(db_connection, data, TABLE_NAME)
             
             last_record_time_ms = data[-1][0]
@@ -49,26 +53,24 @@ def fetch_historical_data(start_dt):
             time.sleep(0.5)
 
         except requests.exceptions.RequestException as e:
-            print(f"❌ Error fetching data from Binance: {e}")
+            log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"[{log_time}] ❌ Error fetching data from Binance: {e}")
             break
     
-    print("--- Historical Data Backfill Complete ---")
+    log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{log_time}] --- Historical Data Backfill Complete ---")
 
 # --- Real-time Data Functions ---
 
 def on_message(ws, message):
     json_message = json.loads(message)
-    # The insert logic for real-time is more complex (ON CONFLICT DO UPDATE),
-    # so we can keep it here or create a specialized function in db_utils.
-    # For now, let's keep it here for clarity.
     k = json_message['k']
     if not k['x']: # Only process closed candles
         return
 
-    print(f"🕯️  New closed candle received: {datetime.fromtimestamp(k['t']/1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}")
+    log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{log_time}] 🕯️  New closed candle received: {datetime.fromtimestamp(k['t']/1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # Using a generic insert from db_utils could be an option if logic is simple
-    # For now, keeping the specific upsert logic here
     insert_query = f"""
     INSERT INTO {TABLE_NAME} (open_time, open_price, high_price, low_price, close_price, volume, close_time, quote_asset_volume, number_of_trades, taker_buy_base_asset_volume, taker_buy_quote_asset_volume, ignore)
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
@@ -84,15 +86,27 @@ def on_message(ws, message):
     with db_connection.cursor() as cur:
         cur.execute(insert_query, data_tuple)
         db_connection.commit()
-    print("   💾 Record inserted/updated successfully.")
+    
+    log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{log_time}]    💾 Record inserted/updated successfully.")
 
-def on_error(ws, error): print(f"--- WebSocket Error: {error} ---")
-def on_close(ws, close_status_code, close_msg): print("--- WebSocket Closed ---")
-def on_open(ws): print(f"--- WebSocket Connection Opened ---\n--- Subscribed to {SYMBOL_WS}@{INTERVAL} klines ---")
+def on_error(ws, error):
+    log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{log_time}] --- WebSocket Error: {error} ---")
+
+def on_close(ws, close_status_code, close_msg):
+    log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{log_time}] --- WebSocket Closed ---")
+
+def on_open(ws):
+    log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{log_time}] --- WebSocket Connection Opened ---")
+    print(f"[{log_time}] --- Subscribed to {SYMBOL_WS}@{INTERVAL} klines ---")
 
 def start_websocket():
     """Initializes and starts the WebSocket client."""
-    print("\n--- Starting Real-time Data Stream ---")
+    log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    print(f"\n[{log_time}] --- Starting Real-time Data Stream ---")
     ws = websocket.WebSocketApp(SOCKET, on_open=on_open, on_message=on_message, on_error=on_error, on_close=on_close)
     ws.run_forever()
 
@@ -109,16 +123,20 @@ if __name__ == "__main__":
         latest_ts = db_utils.get_latest_timestamp(db_connection, TABLE_NAME)
         if latest_ts:
             start_date = latest_ts + timedelta(minutes=1)
-            print(f"Database contains data up to {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}.")
+            log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"[{log_time}] Database contains data up to {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}.")
             fetch_historical_data(start_date)
         else:
-            print("Database is empty. Starting historical download from scratch.")
+            log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            print(f"[{log_time}] Database is empty. Starting historical download from scratch.")
             fetch_historical_data(DEFAULT_START_DATE)
     except Exception as e:
-        print(f"An error occurred during historical backfill: {e}")
+        log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"[{log_time}] An error occurred during historical backfill: {e}")
 
     start_websocket()
 
     if db_connection:
         db_connection.close()
-        print("Database connection closed.")
+        log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        print(f"[{log_time}] Database connection closed.")
