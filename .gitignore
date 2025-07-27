@@ -1,0 +1,17 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Environment variables
+.env
+
+# Database data
+postgres-data/
+db-backup/
+
+# output directories
+output/
+
+# old files
+old/
+
