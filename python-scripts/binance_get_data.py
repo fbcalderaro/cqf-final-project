@@ -1,20 +1,11 @@
-import os
-import psycopg2
-from psycopg2 import extras
 import requests
 import time
 from datetime import datetime, timezone, timedelta
 import websocket
 import json
-import threading
+import db_utils  # Import your new database utility module
 
 # --- Configuration ---
-DB_NAME = os.environ['DB_NAME']
-DB_USER = os.environ['DB_USER']
-DB_PASSWORD = os.environ['DB_PASSWORD']
-DB_HOST = os.environ['DB_HOST']
-DB_PORT = os.environ['DB_PORT']
-
 BINANCE_API_URL = "https://api.binance.com/api/v3/klines"
 SYMBOL_REST = "BTCUSDT"
 SYMBOL_WS = "btcusdt"
@@ -22,30 +13,12 @@ INTERVAL = "1m"
 TABLE_NAME = f"{SYMBOL_WS}_{INTERVAL}_candles"
 SOCKET = f"wss://stream.binance.com:9443/ws/{SYMBOL_WS}@kline_{INTERVAL}"
 
-# --- Global Database Connection ---
-# This connection will be shared by both historical and real-time functions
-db_connection = None
+# Default start date for historical data if the database is empty
+DEFAULT_START_DATE = datetime(2022, 1, 1, tzinfo=timezone.utc)
 
-def get_db_connection():
-    """Establishes a global connection to the PostgreSQL database."""
-    global db_connection
-    try:
-        db_connection = psycopg2.connect(
-            dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD, host=DB_HOST, port=DB_PORT
-        )
-        print("✅ Database connection successful.")
-    except Exception as e:
-        print(f"❌ Could not connect to database: {e}")
-        db_connection = None
+db_connection = None # Global connection for this script
 
 # --- Historical Data Functions ---
-
-def get_latest_timestamp():
-    """Gets the most recent timestamp from the database."""
-    with db_connection.cursor() as cur:
-        cur.execute(f"SELECT MAX(open_time) FROM {TABLE_NAME};")
-        result = cur.fetchone()[0]
-        return result
 
 def fetch_historical_data(start_dt):
     """Fetches and inserts historical data from a start date until now."""
@@ -55,10 +28,8 @@ def fetch_historical_data(start_dt):
 
     while current_dt < end_dt:
         params = {
-            'symbol': SYMBOL_REST,
-            'interval': INTERVAL,
-            'startTime': int(current_dt.timestamp() * 1000),
-            'limit': 1000
+            'symbol': SYMBOL_REST, 'interval': INTERVAL,
+            'startTime': int(current_dt.timestamp() * 1000), 'limit': 1000
         }
         try:
             print(f"⬇️  Fetching records from {current_dt.strftime('%Y-%m-%d %H:%M:%S')}...")
@@ -71,7 +42,7 @@ def fetch_historical_data(start_dt):
                 break
 
             print(f"   ✅ Fetched {len(data)} records.")
-            insert_batch_data(data)
+            db_utils.insert_batch_data(db_connection, data, TABLE_NAME)
             
             last_record_time_ms = data[-1][0]
             current_dt = datetime.fromtimestamp(last_record_time_ms / 1000, tz=timezone.utc) + timedelta(minutes=1)
@@ -83,47 +54,24 @@ def fetch_historical_data(start_dt):
     
     print("--- Historical Data Backfill Complete ---")
 
-def insert_batch_data(data):
-    """Inserts a batch of historical candle data into the database."""
-    if not data:
-        return 0
-
-    transformed_data = [
-        (
-            datetime.fromtimestamp(row[0] / 1000, tz=timezone.utc), row[1], row[2], row[3], row[4], row[5],
-            datetime.fromtimestamp(row[6] / 1000, tz=timezone.utc), row[7], row[8], row[9], row[10], 'historical'
-        ) for row in data
-    ]
-
-    insert_query = f"""
-    INSERT INTO {TABLE_NAME} (
-        open_time, open_price, high_price, low_price, close_price, volume,
-        close_time, quote_asset_volume, number_of_trades,
-        taker_buy_base_asset_volume, taker_buy_quote_asset_volume, ignore
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    ON CONFLICT (open_time) DO NOTHING;
-    """
-    with db_connection.cursor() as cur:
-        extras.execute_batch(cur, insert_query, transformed_data)
-        db_connection.commit()
-        print(f"   💾 Inserted {cur.rowcount} new historical records.")
-
 # --- Real-time Data Functions ---
 
-def insert_realtime_candle(candle_data):
-    """Inserts a single real-time candle data into the database."""
-    k = candle_data['k']
+def on_message(ws, message):
+    json_message = json.loads(message)
+    # The insert logic for real-time is more complex (ON CONFLICT DO UPDATE),
+    # so we can keep it here or create a specialized function in db_utils.
+    # For now, let's keep it here for clarity.
+    k = json_message['k']
     if not k['x']: # Only process closed candles
         return
 
     print(f"🕯️  New closed candle received: {datetime.fromtimestamp(k['t']/1000, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}")
-
+    
+    # Using a generic insert from db_utils could be an option if logic is simple
+    # For now, keeping the specific upsert logic here
     insert_query = f"""
-    INSERT INTO {TABLE_NAME} (
-        open_time, open_price, high_price, low_price, close_price, volume,
-        close_time, quote_asset_volume, number_of_trades,
-        taker_buy_base_asset_volume, taker_buy_quote_asset_volume, ignore
-    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    INSERT INTO {TABLE_NAME} (open_time, open_price, high_price, low_price, close_price, volume, close_time, quote_asset_volume, number_of_trades, taker_buy_base_asset_volume, taker_buy_quote_asset_volume, ignore)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     ON CONFLICT (open_time) DO UPDATE SET
         close_price = EXCLUDED.close_price, high_price = EXCLUDED.high_price,
         low_price = EXCLUDED.low_price, volume = EXCLUDED.volume,
@@ -133,66 +81,44 @@ def insert_realtime_candle(candle_data):
         datetime.fromtimestamp(k['t'] / 1000, tz=timezone.utc), k['o'], k['h'], k['l'], k['c'], k['v'],
         datetime.fromtimestamp(k['T'] / 1000, tz=timezone.utc), k['q'], k['n'], k['V'], k['Q'], 'realtime'
     )
+    with db_connection.cursor() as cur:
+        cur.execute(insert_query, data_tuple)
+        db_connection.commit()
+    print("   💾 Record inserted/updated successfully.")
 
-    try:
-        with db_connection.cursor() as cur:
-            cur.execute(insert_query, data_tuple)
-            db_connection.commit()
-            print("   💾 Record inserted/updated successfully.")
-    except Exception as e:
-        print(f"❌ Error inserting real-time data: {e}")
-
-def on_message(ws, message):
-    json_message = json.loads(message)
-    insert_realtime_candle(json_message)
-
-def on_error(ws, error):
-    print(f"--- WebSocket Error: {error} ---")
-
-def on_close(ws, close_status_code, close_msg):
-    print("--- WebSocket Closed ---")
-
-def on_open(ws):
-    print("--- WebSocket Connection Opened ---")
-    print(f"--- Subscribed to {SYMBOL_WS}@{INTERVAL} klines ---")
+def on_error(ws, error): print(f"--- WebSocket Error: {error} ---")
+def on_close(ws, close_status_code, close_msg): print("--- WebSocket Closed ---")
+def on_open(ws): print(f"--- WebSocket Connection Opened ---\n--- Subscribed to {SYMBOL_WS}@{INTERVAL} klines ---")
 
 def start_websocket():
     """Initializes and starts the WebSocket client."""
     print("\n--- Starting Real-time Data Stream ---")
-    ws = websocket.WebSocketApp(SOCKET,
-                              on_open=on_open,
-                              on_message=on_message,
-                              on_error=on_error,
-                              on_close=on_close)
+    ws = websocket.WebSocketApp(SOCKET, on_open=on_open, on_message=on_message, on_error=on_error, on_close=on_close)
     ws.run_forever()
 
 # --- Main Execution ---
 
 if __name__ == "__main__":
-    get_db_connection()
+    db_connection = db_utils.get_db_connection()
     if db_connection is None:
         exit()
+    
+    db_utils.create_candles_table(db_connection, TABLE_NAME)
 
-    # Step 1: Backfill historical data
     try:
-        latest_ts = get_latest_timestamp()
+        latest_ts = db_utils.get_latest_timestamp(db_connection, TABLE_NAME)
         if latest_ts:
             start_date = latest_ts + timedelta(minutes=1)
             print(f"Database contains data up to {latest_ts.strftime('%Y-%m-%d %H:%M:%S')}.")
             fetch_historical_data(start_date)
         else:
             print("Database is empty. Starting historical download from scratch.")
-            # Define a default start date if the DB is empty
-            start_date = datetime(2022, 1, 1, tzinfo=timezone.utc)
-            fetch_historical_data(start_date)
+            fetch_historical_data(DEFAULT_START_DATE)
     except Exception as e:
         print(f"An error occurred during historical backfill: {e}")
 
-    # Step 2: Start the real-time data stream
-    # This will only run after the historical backfill is complete
     start_websocket()
 
-    # Clean up the connection when the script is stopped
     if db_connection:
         db_connection.close()
         print("Database connection closed.")

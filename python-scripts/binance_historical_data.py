@@ -18,8 +18,8 @@ INTERVAL = "1m"
 TABLE_NAME = f"{SYMBOL.lower()}_{INTERVAL}_candles"
 
 # The earliest date you want data from.
-START_DATE = datetime(2022, 5, 29, 
-                      hour=2, minute=27, second=0, 
+START_DATE = datetime(2020, 1, 1, 
+                      hour=0, minute=0, second=0, 
                       tzinfo=timezone(timedelta(hours=-3)))  # Adjusted for UTC-3 timezone
 #START_DATE = None
 
