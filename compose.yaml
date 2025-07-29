@@ -20,6 +20,13 @@ services:
       context: .
       dockerfile: app.Dockerfile
     restart: always
+    environment:
+      # --- For Database Connection ---
+      - DB_USER=fbcalderaro
+      - DB_PASSWORD=123tusca
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=crypto_trading
     volumes:
       # Mount the entire project directory into the container's /app folder
       - .:/app

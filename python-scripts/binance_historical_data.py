@@ -8,7 +8,7 @@ BINANCE_API_URL = "https://api.binance.com/api/v3/klines"
 SYMBOL = "BTCUSDT"
 INTERVAL = "1m"
 TABLE_NAME = f"{SYMBOL.lower()}_{INTERVAL}_candles"
-START_DATE = datetime(2022, 1, 1, hour=0, minute=0, second=0, tzinfo=timezone.utc)
+START_DATE = datetime(2020, 1, 1, hour=0, minute=0, second=0, tzinfo=timezone.utc)
 
 def fetch_binance_data(symbol, interval, start_time_dt, limit=1000):
     """Fetches k-line data from the Binance API."""
