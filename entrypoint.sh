@@ -1,12 +1,8 @@
 #!/bin/sh
 set -e
 
-# The directory where your code will live
-CODE_DIR="/usr/src/app/code"
-
-# Create the directory if it doesn't exist
-mkdir -p $CODE_DIR
-cd $CODE_DIR
+# The code will live directly in the WORKDIR, which is /app
+echo "Checking Git status in `pwd`..."
 
 # Check if the repository is already cloned
 if [ -d ".git" ]; then
@@ -14,11 +10,11 @@ if [ -d ".git" ]; then
   git pull
 else
   echo "Cloning repository from $GIT_REPO_URL..."
-  # Clone the repository and handle potential empty directory issues
+  # Clone the repository into the current directory
   git clone "$GIT_REPO_URL" .
 fi
 
 echo "✅ Code is up to date."
 
-# Execute the command passed to the container (the CMD from the Dockerfile)
+# Execute the command passed to the container
 exec "$@"
