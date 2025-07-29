@@ -20,12 +20,8 @@ services:
       context: .
       dockerfile: app.Dockerfile
     restart: always
-    environment:
-      - GIT_REPO_URL=https://github.com/fbcalderaro/cqf-final-project.git
-      # Your other environment variables for DB connection, etc.
-      # ...
     volumes:
-      # Mount the entire project directory into /app
+      # Mount the entire project directory into the container's /app folder
       - .:/app
     depends_on:
       - db
