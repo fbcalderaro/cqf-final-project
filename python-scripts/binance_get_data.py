@@ -3,7 +3,7 @@ import time
 from datetime import datetime, timezone, timedelta
 import websocket
 import json
-import db_utils  # Import your new database utility module
+import db_utils 
 
 # --- Configuration ---
 BINANCE_API_URL = "https://api.binance.com/api/v3/klines"
