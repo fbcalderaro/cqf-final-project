@@ -14,3 +14,7 @@ git push origin main
 
 # scripts
 docker exec -it cqf-final-project-app-1 python /app/python-scripts/binance_get_data.py
+docker exec -it cqf-final-project-app-1 python /app/python-scripts/backfill_indicators.py --start 2025-01-01 --end 2025-01-01
+docker exec -it cqf-final-project-app-1 python /app/python-scripts/backtest.py
+docker exec -it cqf-final-project-app-1 python /app/python-scripts/charts.py --start 2024-01-01 --end 2024-01-01
+docker exec -it cqf-final-project-app-1 python /app/python-scripts/broker.py
