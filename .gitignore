@@ -15,3 +15,6 @@ output/
 # old files
 old/
 
+# logs
+*.log
+

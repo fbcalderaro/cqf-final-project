@@ -15,19 +15,18 @@ def fetch_binance_data(symbol, interval, start_time_dt, limit=1000):
     start_time_ms = int(start_time_dt.timestamp() * 1000)
     params = {'symbol': symbol, 'interval': interval, 'startTime': start_time_ms, 'limit': limit}
     try:
-        log_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        print(f"[{log_time}] ⬇️  Fetching {limit} records from {start_time_dt.strftime('%Y-%m-%d %H:%M:%S')}...")
+        common.log(f" ⬇️  Fetching {limit} records from {start_time_dt.strftime('%Y-%m-%d %H:%M:%S')}...")
         response = requests.get(BINANCE_API_URL, params=params)
         response.raise_for_status()
-        print(f"   ✅ Fetched {len(response.json())} records.")
+        common.log(f"   ✅ Fetched {len(response.json())} records.")
         return response.json()
     except requests.exceptions.RequestException as e:
-        print(f"[{log_time}] ❌ Error fetching data: {e}")
+        common.log(f" ❌ Error fetching data: {e}")
         return []
 
 def main():
     """Main function to backfill historical data."""
-    print("--- Starting Historical Data Backfiller ---")
+    common.log(" --- Starting Historical Data Backfiller ---")
     conn = db_utils.get_db_connection()
     if conn is None: return
 
@@ -37,25 +36,25 @@ def main():
     oldest_ts_in_db = db_utils.get_oldest_timestamp(conn, TABLE_NAME, start_date=START_DATE)
 
     if oldest_ts_in_db is None:
-        print("❌ No data found after the start date. Please run the real-time script first.")
+        common.log("❌ No data found after the start date. Please run the real-time script first.")
         conn.close()
         return
 
-    print(f"Oldest relevant record is from: {oldest_ts_in_db.strftime('%Y-%m-%d %H:%M:%S')}")
+    common.log(f"Oldest relevant record is from: {oldest_ts_in_db.strftime('%Y-%m-%d %H:%M:%S')}")
     start_of_gap = START_DATE
     end_of_gap = oldest_ts_in_db
 
     if start_of_gap >= end_of_gap:
-        print("✅ No historical gap to fill.")
+        common.log("✅ No historical gap to fill.")
         conn.close()
         return
 
-    print(f"--- Backfilling data from {start_of_gap.strftime('%Y-%m-%d')} to {end_of_gap.strftime('%Y-%m-%d')} ---")
+    common.log(f"--- Backfilling data from {start_of_gap.strftime('%Y-%m-%d')} to {end_of_gap.strftime('%Y-%m-%d')} ---")
     current_dt = start_of_gap
     while current_dt < end_of_gap:
         data = fetch_binance_data(SYMBOL, INTERVAL, current_dt)
         if not data:
-            print("⏹️ No more data from API. Stopping.")
+            common.log("⏹️ No more data from API. Stopping.")
             break
         
         db_utils.insert_batch_data(conn, data, TABLE_NAME)
@@ -64,7 +63,7 @@ def main():
         time.sleep(0.5)
 
     conn.close()
-    print("\n--- Backfill complete. Connection closed. ---")
+    common.log("--- Backfill complete. Connection closed. ---")
 
 if __name__ == "__main__":
     main()

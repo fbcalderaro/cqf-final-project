@@ -1,6 +1,6 @@
 import websocket
 import json
-import db_utils # Import the new utility module
+import db_utils 
 
 # --- Configuration ---
 TABLE_NAME = "btcusdt_1m_candles"
@@ -13,7 +13,6 @@ db_connection = None # Global connection for this script
 def on_message(ws, message):
     """Callback to handle incoming WebSocket messages."""
     json_message = json.loads(message)
-    # Call the new upsert function from the utility module
     db_utils.upsert_realtime_candle(db_connection, json_message, TABLE_NAME)
 
 def on_error(ws, error): print(f"--- WebSocket Error: {error} ---")

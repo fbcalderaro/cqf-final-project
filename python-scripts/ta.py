@@ -1,105 +1,132 @@
-import os
-import psycopg2
 import polars as pl
+import pandas as pd
 import db_utils
-from datetime import datetime # <-- Added this import
+from common import log
+import config # Import the config module
 
-# --- Table Configuration ---
-CANDLES_TABLE_NAME = "btcusdt_1m_candles"
-INDICATORS_TABLE_NAME = "btcusdt_1m_indicators"
-START_DATE = datetime(2025, 1, 1, hour=0, minute=0, second=0, tzinfo=timezone.utc)
+def _calculate_supertrend_pandas(df: pd.DataFrame, period: int, multiplier: float) -> pd.Series:
+    """
+    Calculates a Supertrend series using pandas due to its iterative nature.
+    """
+    atr_col_name = f'st_atr_{period}'
+    # Ensure input columns are float for calculation
+    df['high_price'] = df['high_price'].astype(float)
+    df['low_price'] = df['low_price'].astype(float)
+    df['close_price'] = df['close_price'].astype(float)
+    df['true_range'] = df['true_range'].astype(float)
+    
+    df[atr_col_name] = df['true_range'].ewm(alpha=1/period, adjust=False).mean()
+
+    df['upper_band'] = (df['high_price'] + df['low_price']) / 2 + multiplier * df[atr_col_name]
+    df['lower_band'] = (df['high_price'] + df['low_price']) / 2 - multiplier * df[atr_col_name]
+    df['supertrend_dir'] = 1
+
+    for i in range(1, len(df)):
+        if df.loc[i-1, 'supertrend_dir'] == 1:
+            if df.loc[i, 'close_price'] < df.loc[i-1, 'lower_band']:
+                df.loc[i, 'supertrend_dir'] = -1
+            else:
+                df.loc[i, 'supertrend_dir'] = 1
+                df.loc[i, 'lower_band'] = max(df.loc[i, 'lower_band'], df.loc[i-1, 'lower_band'])
+        else:
+            if df.loc[i, 'close_price'] > df.loc[i-1, 'upper_band']:
+                df.loc[i, 'supertrend_dir'] = 1
+            else:
+                df.loc[i, 'supertrend_dir'] = -1
+                df.loc[i, 'upper_band'] = min(df.loc[i, 'upper_band'], df.loc[i-1, 'upper_band'])
+    
+    return df['supertrend_dir']
+
 
 def calculate_indicators(df: pl.DataFrame) -> pl.DataFrame:
     """Calculates technical analysis indicators using pure Polars expressions."""
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Calculating technical indicators...")
+    log.info("Calculating technical indicators...")
 
-    adx_period = 14
+    # --- Use strategy parameters from config ---
+    strategy_params = config.STRATEGY_CONFIG
+    rsi_period = strategy_params.getint('rsi_period')
+    atr_period = strategy_params.getint('atr_period')
+    adx_period = strategy_params.getint('adx_period')
+    st_period = strategy_params.getint('supertrend_period')
+    st_multiplier = strategy_params.getfloat('supertrend_multiplier')
+    
     alpha = 1 / adx_period
 
     df_with_indicators = df.with_columns(
         delta=pl.col("close_price").diff(),
+        up=pl.col("high_price").diff(),
+        down=-(pl.col("low_price").diff()),
     ).with_columns(
         gain=pl.when(pl.col("delta") > 0).then(pl.col("delta")).otherwise(0),
         loss=pl.when(pl.col("delta") < 0).then(-pl.col("delta")).otherwise(0),
     ).with_columns(
-        avg_gain=pl.col("gain").ewm_mean(alpha=1/14, adjust=False),
-        avg_loss=pl.col("loss").ewm_mean(alpha=1/14, adjust=False),
+        avg_gain_rsi=pl.col("gain").ewm_mean(alpha=1/rsi_period, adjust=False),
+        avg_loss_rsi=pl.col("loss").ewm_mean(alpha=1/rsi_period, adjust=False),
     ).with_columns(
-        rs=pl.col("avg_gain") / pl.col("avg_loss"),
+        rs_rsi=pl.col("avg_gain_rsi") / pl.col("avg_loss_rsi"),
     ).with_columns(
-        rsi_14=100.0 - (100.0 / (1.0 + pl.col("rs"))),
+        (pl.lit(100.0) - (pl.lit(100.0) / (pl.lit(1.0) + pl.col("rs_rsi")))).alias(f"rsi_{rsi_period}"),
     ).with_columns(
-        ema_fast=pl.col("close_price").ewm_mean(span=12, adjust=False),
-        ema_slow=pl.col("close_price").ewm_mean(span=26, adjust=False),
+        true_range=pl.max_horizontal([
+            (pl.col("high_price") - pl.col("low_price")),
+            (pl.col("high_price") - pl.col("close_price").shift(1)).abs(),
+            (pl.col("low_price") - pl.col("close_price").shift(1)).abs()
+        ])
     ).with_columns(
-        macd=pl.col("ema_fast") - pl.col("ema_slow"),
+        pl.col("true_range").ewm_mean(alpha=1/atr_period, adjust=False).alias(f"atr_{atr_period}"),
     ).with_columns(
-        macd_signal=pl.col("macd").ewm_mean(span=9, adjust=False),
+        plus_dm=pl.when((pl.col("up") > pl.col("down")) & (pl.col("up") > 0)).then(pl.col("up")).otherwise(0),
+        minus_dm=pl.when((pl.col("down") > pl.col("up")) & (pl.col("down") > 0)).then(pl.col("down")).otherwise(0),
     ).with_columns(
-        macd_hist=pl.col("macd") - pl.col("macd_signal"),
+        plus_dm_smoothed=pl.col("plus_dm").ewm_mean(alpha=alpha, adjust=False),
+        minus_dm_smoothed=pl.col("minus_dm").ewm_mean(alpha=alpha, adjust=False),
+        tr_smoothed=pl.col("true_range").ewm_mean(alpha=alpha, adjust=False),
     ).with_columns(
-        bb_middle=pl.col("close_price").rolling_mean(window_size=20),
-        bb_std=pl.col("close_price").rolling_std(window_size=20),
+        plus_di=pl.lit(100) * (pl.col("plus_dm_smoothed") / pl.col("tr_smoothed")),
+        minus_di=pl.lit(100) * (pl.col("minus_dm_smoothed") / pl.col("tr_smoothed")),
     ).with_columns(
-        bb_upper=pl.col("bb_middle") + (pl.col("bb_std") * 2),
-        bb_lower=pl.col("bb_middle") - (pl.col("bb_std") * 2),
+        dx=pl.when((pl.col("plus_di") + pl.col("minus_di")) == 0)
+                 .then(0)
+                 .otherwise(pl.lit(100) * (pl.col("plus_di") - pl.col("minus_di")).abs() / (pl.col("plus_di") + pl.col("minus_di"))),
     ).with_columns(
-        ema_50=pl.col("close_price").ewm_mean(span=50, adjust=False),
-    ).with_columns(
-        prev_close=pl.col("close_price").shift(1),
-        prev_high=pl.col("high_price").shift(1),
-        prev_low=pl.col("low_price").shift(1),
-    ).with_columns(
-        tr_a=pl.col("high_price") - pl.col("low_price"),
-        tr_b=(pl.col("high_price") - pl.col("prev_close")).abs(),
-        tr_c=(pl.col("low_price") - pl.col("prev_close")).abs(),
-    ).with_columns(
-        true_range=pl.max_horizontal(["tr_a", "tr_b", "tr_c"])
-    ).with_columns(
-        up_move=pl.col("high_price") - pl.col("prev_high"),
-        down_move=pl.col("prev_low") - pl.col("low_price"),
-    ).with_columns(
-        plus_dm=pl.when((pl.col("up_move") > pl.col("down_move")) & (pl.col("up_move") > 0)).then(pl.col("up_move")).otherwise(0),
-        minus_dm=pl.when((pl.col("down_move") > pl.col("up_move")) & (pl.col("down_move") > 0)).then(pl.col("down_move")).otherwise(0),
-    ).with_columns(
-        atr_14=pl.col("true_range").ewm_mean(alpha=alpha, adjust=False),
-        plus_dm_14=pl.col("plus_dm").ewm_mean(alpha=alpha, adjust=False),
-        minus_dm_14=pl.col("minus_dm").ewm_mean(alpha=alpha, adjust=False),
-    ).with_columns(
-        plus_di_14=100 * (pl.col("plus_dm_14") / pl.col("atr_14")),
-        minus_di_14=100 * (pl.col("minus_dm_14") / pl.col("atr_14")),
-    ).with_columns(
-        dx_14=(100 * (pl.col("plus_di_14") - pl.col("minus_di_14")).abs() / (pl.col("plus_di_14") + pl.col("minus_di_14"))),
-    ).with_columns(
-        adx_14=pl.col("dx_14").ewm_mean(alpha=alpha, adjust=False)
+        pl.col("dx").ewm_mean(alpha=alpha, adjust=False).alias(f"adx_{adx_period}")
+    )
+
+    pandas_df = df_with_indicators.to_pandas()
+    st_dir_col_name = f'supertrend_{st_period}_{str(st_multiplier).replace(".", "_")}_dir'
+    st_dir = _calculate_supertrend_pandas(pandas_df.copy(), period=st_period, multiplier=st_multiplier)
+    pandas_df[st_dir_col_name] = st_dir
+    df_with_indicators = pl.from_pandas(pandas_df)
+    
+    # --- BUG FIX: Select the correct, dynamically named columns ---
+    indicators_df = df_with_indicators.select(
+        pl.col("open_time"), 
+        pl.col(f"rsi_{rsi_period}"),
+        pl.col(f"atr_{atr_period}"),
+        pl.col(f"adx_{adx_period}"),
+        pl.col("plus_di").alias(f"plus_di_{adx_period}"),
+        pl.col("minus_di").alias(f"minus_di_{adx_period}"),
+        pl.col(st_dir_col_name)
     )
     
-    indicators_df = df_with_indicators.select(
-        pl.col("open_time"), pl.col("rsi_14"), pl.col("macd"), pl.col("macd_signal"),
-        pl.col("macd_hist"), pl.col("bb_lower"), pl.col("bb_middle"), pl.col("bb_upper"),
-        pl.col("ema_50"), pl.col("adx_14"), pl.col("plus_di_14"), pl.col("minus_di_14"),
-    )
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ Indicators calculated.")
+    log.info("✅ Indicators calculated.")
     return indicators_df.drop_nulls()
 
 def main():
     """Main function to run the indicator calculation and saving process."""
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] --- Starting Indicator Calculation Process ---")
+    log.info("--- Starting Indicator Calculation Process ---")
     
-    # Step 1: Use db_utils to fetch data
-    candles_df = db_utils.fetch_candles_as_polars_df(CANDLES_TABLE_NAME, START_TIME)
+    candles_df = db_utils.fetch_candles_as_polars_df(config.CANDLES_TABLE_NAME, config.DEFAULT_START_DATE)
 
     if candles_df is None or candles_df.is_empty():
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] Could not fetch data. Exiting.")
+        log.error("Could not fetch data. Exiting.")
         return
 
-    # Step 2: Calculate indicators
     indicators_df = calculate_indicators(candles_df)
-    print(f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] --- Calculated Indicators (Sample) ---")
+    log.info("--- Calculated Indicators (Sample) ---")
     print(indicators_df.tail())
 
-    # Step 3: Save indicators to the database
-    db_utils.save_indicators_to_db(indicators_df)
+    db_utils.save_indicators_to_db(indicators_df, config.INDICATORS_TABLE_NAME)
 
 if __name__ == "__main__":
     main()

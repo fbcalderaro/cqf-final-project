@@ -1,131 +1,117 @@
 import os
-import psycopg2
+import argparse
+from datetime import datetime, timezone, timedelta
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import db_utils
+import config
+from common import log
 
-# --- Database Configuration ---
-# Ensure these environment variables are set in your system
-DB_NAME = os.environ['DB_NAME']
-DB_USER = os.environ['DB_USER']
-DB_PASSWORD = os.environ['DB_PASSWORD']
-DB_HOST = os.environ['DB_HOST']
-DB_PORT = os.environ['DB_PORT']
-
-CANDLES_TABLE = "btcusdt_1m_candles"
-INDICATORS_TABLE = "btcusdt_1m_indicators"
-LIMIT = 1000  # Number of records to fetch for the chart
-
-def get_data_from_db():
+def generate_chart(start_dt, end_dt):
     """
-    Connects to the PostgreSQL database and fetches the latest 1000 candles,
-    joining them with their corresponding Bollinger Band indicators.
+    Generates and saves a detailed strategy chart for a given date range.
     """
-    print("Connecting to the database...")
-    try:
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT
-        )
-        print("✅ Connection successful.")
+    log.info(f"Generating chart for period: {start_dt.date()} to {end_dt.date()}")
 
-        # SQL Query to join the latest 1000 candles with their indicators.
-        sql_query = f"""
-        WITH latest_candles AS (
-            SELECT * FROM {CANDLES_TABLE}
-            ORDER BY open_time DESC
-            LIMIT {LIMIT}
-        )
-        SELECT 
-            c.open_time as time, 
-            c.open_price as open,
-            c.high_price as high,
-            c.low_price as low,
-            c.close_price as close,
-            c.volume,
-            i.bb_upper,
-            i.bb_middle,
-            i.bb_lower
-        FROM latest_candles c
-        LEFT JOIN {INDICATORS_TABLE} i ON c.open_time = i.open_time
-        ORDER BY c.open_time ASC;
-        """
-
-        print(f"Fetching latest {LIMIT} records with indicators...")
-        # Use pandas to directly read the SQL query into a DataFrame
-        df = pd.read_sql_query(sql_query, conn)
-        print(f"✅ Successfully loaded {len(df)} rows of data.")
-
-        # Ensure the numeric columns have the correct type
-        numeric_cols = ['open', 'high', 'low', 'close', 'volume', 'bb_upper', 'bb_middle', 'bb_lower']
-        for col in numeric_cols:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col])
-
-        return df
-
-    except Exception as e:
-        print(f"❌ An error occurred: {e}")
-        return None
-    finally:
-        if 'conn' in locals() and conn:
-            conn.close()
-            print("Database connection closed.")
-
-if __name__ == '__main__':
-    # Step 1: Load combined candle and indicator data from the database
-    df = get_data_from_db()
+    # Step 1: Fetch data using the function in db_utils
+    df = db_utils.fetch_candles_and_indicators_for_range(start_dt, end_dt)
 
     if df is None or df.empty:
-        print("Could not load data. Exiting.")
-    else:
-        # Step 2: Initialize the chart figure with Plotly
-        fig = go.Figure()
+        return
 
-        # Step 3: Add the Candlestick series
-        fig.add_trace(go.Candlestick(x=df['time'],
-                                     open=df['open'],
-                                     high=df['high'],
-                                     low=df['low'],
-                                     close=df['close'],
-                                     name='Candles'))
+    # Step 2: Create a figure with subplots
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.05,
+        row_heights=[0.6, 0.2, 0.2]
+    )
 
-        # Step 4: Add the Bollinger Band lines
-        # Upper Band
-        fig.add_trace(go.Scatter(x=df['time'], y=df['bb_upper'],
-                                 mode='lines',
-                                 name='Upper Band',
-                                 line=dict(color='rgba(173, 216, 230, 0.5)', width=1))) # Light blue
-        
-        # Middle Band
-        fig.add_trace(go.Scatter(x=df['time'], y=df['bb_middle'],
-                                 mode='lines',
-                                 name='BB Middle (SMA 20)',
-                                 line=dict(color='rgba(255, 165, 0, 0.5)', width=1, dash='dash'))) # Orange, dashed
-        
-        # Lower Band - with fill to the upper band
-        fig.add_trace(go.Scatter(x=df['time'], y=df['bb_lower'],
-                                 mode='lines',
-                                 name='Lower Band',
-                                 line=dict(color='rgba(173, 216, 230, 0.5)', width=1),
-                                 fill='tonexty', # Fills the area to the previous trace (the upper band)
-                                 fillcolor='rgba(173, 216, 230, 0.1)'))
+    # --- Subplot 1: Price Candlesticks and Supertrend ---
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df['open_price'], high=df['high_price'],
+        low=df['low_price'], close=df['close_price'],
+        name='Price'
+    ), row=1, col=1)
 
+    # --- BUG FIX: Optimized Supertrend Background Logic ---
+    # This new logic draws one large rectangle per trend period instead of thousands
+    # of small ones, which prevents the script from hanging.
+    current_trend = None
+    trend_start_time = None
 
-        # Step 5: Customize the chart layout
-        fig.update_layout(
-            title=f'BTCUSDT (Latest {LIMIT} Records)',
-            yaxis_title='Price (USD)',
-            xaxis_rangeslider_visible=False, 
-            legend_title="Legend",
-            template="plotly_dark"
+    for i in range(len(df)):
+        timestamp = df.index[i]
+        trend = df['supertrend_direction'].iloc[i]
+
+        if trend != current_trend:
+            if current_trend is not None:
+                color = 'rgba(0, 255, 0, 0.1)' if current_trend == 1 else 'rgba(255, 0, 0, 0.1)'
+                fig.add_vrect(
+                    x0=trend_start_time, x1=timestamp,
+                    fillcolor=color, layer="below", line_width=0,
+                    row=1, col=1
+                )
+            current_trend = trend
+            trend_start_time = timestamp
+
+    # Add the final rectangle for the last trend period
+    if current_trend is not None and trend_start_time is not None:
+        color = 'rgba(0, 255, 0, 0.1)' if current_trend == 1 else 'rgba(255, 0, 0, 0.1)'
+        fig.add_vrect(
+            x0=trend_start_time, x1=df.index[-1],
+            fillcolor=color, layer="below", line_width=0,
+            row=1, col=1
         )
 
-        # Step 6: Save the chart to an HTML file
-        output_filename = 'btc_chart.html'
-        fig.write_html(output_filename)
-        
-        print(f"\n✅ Chart successfully saved as '{output_filename}'.")
-        print("You can download this file and open it in your browser.")
+    # --- Subplot 2: RSI and Buy/Sell Zones ---
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df['rsi'], mode='lines', name='RSI',
+        line=dict(color='yellow', width=1)
+    ), row=2, col=1)
+    fig.add_hrect(y0=config.RSI_BUY_ZONE[0], y1=config.RSI_BUY_ZONE[1], line_width=0, fillcolor="green", opacity=0.2, row=2, col=1)
+    fig.add_hrect(y0=config.RSI_SELL_ZONE[0], y1=config.RSI_SELL_ZONE[1], line_width=0, fillcolor="red", opacity=0.2, row=2, col=1)
+
+    # --- Subplot 3: ADX and DMI ---
+    fig.add_trace(go.Scatter(x=df.index, y=df['adx'], mode='lines', name='ADX', line=dict(color='cyan', width=2)), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['plus_di'], mode='lines', name='+DI', line=dict(color='lime', width=1)), row=3, col=1)
+    fig.add_trace(go.Scatter(x=df.index, y=df['minus_di'], mode='lines', name='-DI', line=dict(color='tomato', width=1)), row=3, col=1)
+    fig.add_hline(y=config.ADX_THRESHOLD, line_width=1, line_dash="dash", line_color="white", row=3, col=1)
+
+    # --- Layout Customization ---
+    fig.update_layout(
+        title_text=f"{config.SYMBOL} Strategy Chart ({config.STREAM_INTERVAL})",
+        xaxis_rangeslider_visible=False,
+        template="plotly_dark",
+        height=800,
+        showlegend=False
+    )
+    fig.update_yaxes(title_text="Price", row=1, col=1)
+    fig.update_yaxes(title_text="RSI", row=2, col=1)
+    fig.update_yaxes(title_text="ADX/DMI", row=3, col=1)
+
+    # --- Save to File ---
+    if not os.path.exists(config.OUTPUT_DIR):
+        os.makedirs(config.OUTPUT_DIR)
+        log.info(f"Created directory: {config.OUTPUT_DIR}")
+
+    filename = f"{config.SYMBOL}_{start_dt.date()}_to_{end_dt.date()}.html"
+    filepath = os.path.join(config.OUTPUT_DIR, filename)
+    fig.write_html(filepath)
+    log.info(f"✅ Chart successfully saved to '{filepath}'")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Generate strategy charts for a given date range.")
+    parser.add_argument('--start', required=True, help="Start date in YYYY-MM-DD format.")
+    parser.add_argument('--end', required=True, help="End date in YYYY-MM-DD format.")
+    args = parser.parse_args()
+
+    try:
+        start_date = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end_date = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc) + timedelta(days=1)
+        generate_chart(start_date, end_date)
+    except ValueError:
+        log.error("❌ Invalid date format. Please use YYYY-MM-DD.")
+

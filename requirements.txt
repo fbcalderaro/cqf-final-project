@@ -1,10 +1,14 @@
-python-binance
+connectorx
+IPython
 pandas
 plotly
 polars
 polars-ta
 psycopg2-binary
+pyarrow
+python-binance
 python-decouple
+quantstats
 requests
 sqlalchemy
 websocket-client

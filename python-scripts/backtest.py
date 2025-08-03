@@ -1,219 +1,226 @@
-import os
-import psycopg2
-import pandas as pd
 import numpy as np
+import pandas as pd
 import quantstats as qs
 import matplotlib
-
-# --- Database Configuration ---
-# This script assumes you have the same environment variables set up as your other files.
-DB_NAME = os.environ.get('DB_NAME')
-DB_USER = os.environ.get('DB_USER')
-DB_PASSWORD = os.environ.get('DB_PASSWORD')
-DB_HOST = os.environ.get('DB_HOST')
-DB_PORT = os.environ.get('DB_PORT')
-
-TABLE_NAME = "btcusdt_1m_candles"
-
-def get_data_from_db():
-    """
-    Connects to the PostgreSQL database and fetches all candle data,
-    loading it into a pandas DataFrame. This function is adapted from your
-    trend_following.py script.
-    """
-    print("Connecting to the database...")
-    if not all([DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT]):
-        print("❌ Error: Database environment variables are not set.")
-        return None
-        
-    try:
-        conn = psycopg2.connect(
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            host=DB_HOST,
-            port=DB_PORT
-        )
-        print("✅ Connection successful.")
-
-        sql_query = f"SELECT open_time, open_price, high_price, low_price, close_price, volume FROM {TABLE_NAME} ORDER BY open_time ASC LIMIT 10000;"
-        print(f"Fetching all data from '{TABLE_NAME}'...")
-        
-        df = pd.read_sql_query(sql_query, conn, index_col='open_time')
-        print(f"✅ Successfully loaded {len(df)} rows of data.")
-
-        # Ensure numeric columns are of the correct type
-        numeric_cols = ['open_price', 'high_price', 'low_price', 'close_price', 'volume']
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-        
-        df.dropna(inplace=True)
-
-        return df
-
-    except Exception as e:
-        print(f"❌ An error occurred: {e}")
-        return None
-    finally:
-        if 'conn' in locals() and conn:
-            conn.close()
-            print("Database connection closed.")
-
-class MovingAverageCrossover:
-    """
-    Encapsulates the logic for the moving average crossover strategy.
-    """
-    def __init__(self, df, fast_ma, slow_ma):
-        self.df = df
-        self.fast_ma = fast_ma
-        self.slow_ma = slow_ma
-
-    def generate_signals(self):
-        """
-        Calculates moving averages and generates trading signals based on crossovers.
-        
-        Returns:
-            pd.DataFrame: A DataFrame with original data, MAs, and a 'position' column
-                          indicating trade triggers (2 for buy, -2 for sell).
-        """
-        print(f"Calculating {self.fast_ma}-period and {self.slow_ma}-period moving averages...")
-        df = self.df.copy()
-        df['sma_fast'] = df['close_price'].rolling(window=self.fast_ma, min_periods=1).mean()
-        df['sma_slow'] = df['close_price'].rolling(window=self.slow_ma, min_periods=1).mean()
-        
-        # Generate a signal: 1 for long, -1 for short/flat
-        df['signal'] = np.where(df['sma_fast'] > df['sma_slow'], 1, -1)
-        
-        # Generate a position trigger on the crossover event
-        # 2.0 indicates a crossover to long (buy)
-        # -2.0 indicates a crossover to flat (sell)
-        df['position'] = df['signal'].diff()
-        
-        print("✅ Signals generated.")
-        return df
+import db_utils 
+from common import log 
+import os 
+import config
 
 class Backtester:
     """
-    A class to run a vectorized backtest on a given strategy.
+    A class to run an event-driven backtest on a given strategy.
     """
-    def __init__(self, data, strategy_class, params, initial_capital=10000.0, commission=0.001):
-        self.data = data
-        self.strategy = strategy_class(self.data, **params)
+    def __init__(self, data, initial_capital=10000.0, commission=0.001, risk_per_trade=0.01, atr_stop_multiplier=2.5, rsi_buy_zone=(40, 55), rsi_sell_zone=(45, 60), adx_threshold=25, verbose=False, max_position_pct=0.25):
+        self.data = data.rename(columns={
+            'high_price': 'High', 'low_price': 'Low', 'close_price': 'Close', 'open_price': 'Open',
+            'rsi_9': 'rsi', 'atr_14': 'atr', 'adx_14': 'adx', 'plus_di_14': 'plus_di', 'minus_di_14': 'minus_di'
+        })
         self.initial_capital = initial_capital
         self.commission = commission
+        self.risk_per_trade = risk_per_trade
+        self.atr_stop_multiplier = atr_stop_multiplier
+        self.rsi_buy_zone = rsi_buy_zone
+        self.rsi_sell_zone = rsi_sell_zone
+        self.adx_threshold = adx_threshold
         self.trades = []
         self.equity_curve = None
+        self.verbose = verbose
+        self.max_position_pct = max_position_pct
 
     def run(self):
         """
-        Executes the backtest.
+        Executes the event-driven backtest.
         """
-        print("\n--- Running Backtest ---")
-        signals_df = self.strategy.generate_signals()
+        log.info("\n--- Running Backtest for Adaptive Trend Rider (15-Min Resampled) ---")
+        
+        indicators_df = self.data 
 
         cash = self.initial_capital
-        position_size = 0  # Number of units of the asset held
+        position_size_units, position_type, stop_loss_price, entry_price, highest_high_since_entry = 0, None, 0, 0, 0
+        in_position = False
+        lowest_low_since_entry = float('inf')
+        cash_before_trade = cash
         portfolio_values = []
 
-        for i, row in signals_df.iterrows():
-            trade_trigger = row['position']
+        for i in range(1, len(indicators_df)):
+            current_row = indicators_df.iloc[i]
 
-            # --- SELL LOGIC ---
-            # If trigger is -2.0 (sell) and we currently have a position
-            if trade_trigger == -2.0 and position_size > 0:
-                trade_value = position_size * row['close_price']
-                fee = trade_value * self.commission
-                cash = trade_value - fee
-                
-                self.trades.append({
-                    'date': i, 'type': 'sell', 'price': row['close_price'],
-                    'size': position_size, 'value': trade_value
-                })
-                print(f"{i} | SELL at ${row['close_price']:,.2f} | Portfolio: ${cash:,.2f}")
-                position_size = 0
+            if in_position:
+                if position_type == 'long':
+                    highest_high_since_entry = max(highest_high_since_entry, current_row['High'])
+                    new_stop_loss = highest_high_since_entry - (current_row['atr'] * self.atr_stop_multiplier)
+                    stop_loss_price = max(stop_loss_price, new_stop_loss) 
 
-            # --- BUY LOGIC ---
-            # If trigger is 2.0 (buy) and we are currently in cash
-            elif trade_trigger == 2.0 and cash > 0:
-                trade_value = cash
-                fee = trade_value * self.commission
-                cash_to_invest = trade_value - fee
-                position_size = cash_to_invest / row['close_price']
+                    if current_row['Low'] <= stop_loss_price:
+                        trade_value = position_size_units * stop_loss_price; fee = trade_value * self.commission
+                        cash += trade_value - fee
+                        self.trades.append({'date': current_row.name, 'type': 'stop_loss_long', 'price': stop_loss_price, 'size': position_size_units, 'value': trade_value})
+                        log.info(f"{current_row.name} | STOP-LOSS (LONG) at ${stop_loss_price:,.2f} | Portfolio: ${cash:,.2f}")
+                        in_position = False
                 
-                self.trades.append({
-                    'date': i, 'type': 'buy', 'price': row['close_price'],
-                    'size': position_size, 'value': trade_value
-                })
-                print(f"{i} | BUY  at ${row['close_price']:,.2f} | Holding {position_size:,.4f} units")
-                cash = 0
-            
-            # Update portfolio value at every step
-            current_portfolio_value = cash + (position_size * row['close_price'])
+                elif position_type == 'short':
+                    lowest_low_since_entry = min(lowest_low_since_entry, current_row['Low'])
+                    new_stop_loss = lowest_low_since_entry + (current_row['atr'] * self.atr_stop_multiplier)
+                    stop_loss_price = min(stop_loss_price, new_stop_loss)
+
+                    if current_row['High'] >= stop_loss_price:
+                        cost_to_cover = position_size_units * stop_loss_price; profit = self.trades[-1]['value'] - cost_to_cover
+                        fee = cost_to_cover * self.commission; cash = cash_before_trade + profit - fee
+                        self.trades.append({'date': current_row.name, 'type': 'stop_loss_short', 'price': stop_loss_price, 'size': position_size_units, 'value': cost_to_cover})
+                        log.info(f"{current_row.name} | STOP-LOSS (SHORT) at ${stop_loss_price:,.2f} | Portfolio: ${cash:,.2f}")
+                        in_position = False
+
+            if not in_position:
+                is_trending = current_row['adx'] > self.adx_threshold
+                is_bullish = current_row['plus_di'] > current_row['minus_di']
+                is_bearish = current_row['minus_di'] > current_row['plus_di']
+                in_buy_zone = self.rsi_buy_zone[0] <= current_row['rsi'] <= self.rsi_buy_zone[1]
+                in_sell_zone = self.rsi_sell_zone[0] <= current_row['rsi'] <= self.rsi_sell_zone[1]
+
+                if self.verbose:
+                    log.info(f"{current_row.name} | Trend: {current_row['supertrend_direction']}, Trending: {is_trending}, Bullish: {is_bullish}, InBuyZone: {in_buy_zone}, InSellZone: {in_sell_zone}, RSI: {current_row['rsi']:.2f}")
+
+                if (current_row['supertrend_direction'] == 1 and is_trending and is_bullish and in_buy_zone):
+                    entry_price = current_row['Close']
+                    initial_stop_loss = entry_price - (current_row['atr'] * self.atr_stop_multiplier)
+                    risk_per_unit = entry_price - initial_stop_loss
+                    if risk_per_unit > 0:
+                        capital_at_risk = cash * self.risk_per_trade
+                        risk_based_size = capital_at_risk / risk_per_unit
+                        
+                        max_position_value = cash * self.max_position_pct
+                        max_position_size = max_position_value / entry_price
+                        
+                        position_size_units = min(risk_based_size, max_position_size)
+                        
+                        trade_value = position_size_units * entry_price
+                        if trade_value > 0 and cash >= trade_value:
+                            fee = trade_value * self.commission; cash -= (trade_value + fee)
+                            in_position = True; position_type = 'long'; stop_loss_price = initial_stop_loss
+                            highest_high_since_entry = current_row['High']
+                            self.trades.append({'date': current_row.name, 'type': 'buy', 'price': entry_price, 'size': position_size_units, 'value': trade_value})
+                            log.info(f"{current_row.name} | BUY at ${entry_price:,.2f} | Holding {position_size_units:,.4f} units")
+
+                elif (current_row['supertrend_direction'] == -1 and is_trending and is_bearish and in_sell_zone):
+                    entry_price = current_row['Close']
+                    initial_stop_loss = entry_price + (current_row['atr'] * self.atr_stop_multiplier)
+                    risk_per_unit = initial_stop_loss - entry_price
+                    if risk_per_unit > 0:
+                        capital_at_risk = cash * self.risk_per_trade
+                        risk_based_size = capital_at_risk / risk_per_unit
+
+                        max_position_value = cash * self.max_position_pct
+                        max_position_size = max_position_value / entry_price
+
+                        position_size_units = min(risk_based_size, max_position_size)
+                        
+                        trade_value = position_size_units * entry_price
+                        if trade_value > 0:
+                            cash_before_trade = cash; in_position = True; position_type = 'short'
+                            stop_loss_price = initial_stop_loss; lowest_low_since_entry = current_row['Low']
+                            self.trades.append({'date': current_row.name, 'type': 'sell_short', 'price': entry_price, 'size': position_size_units, 'value': trade_value})
+                            log.info(f"{current_row.name} | SELL SHORT at ${entry_price:,.2f} | Holding {position_size_units:,.4f} units")
+
+            current_portfolio_value = cash
+            if in_position:
+                if position_type == 'long':
+                    current_portfolio_value += position_size_units * current_row['Close']
+                elif position_type == 'short':
+                    unrealized_pnl = self.trades[-1]['value'] - (position_size_units * current_row['Close'])
+                    current_portfolio_value = cash_before_trade + unrealized_pnl
             portfolio_values.append(current_portfolio_value)
 
-        self.equity_curve = pd.Series(portfolio_values, index=signals_df.index)
+        self.equity_curve = pd.Series(portfolio_values, index=indicators_df.index[1:])
         self.equity_curve.name = 'equity'
-        print("--- Backtest Finished ---")
+        log.info("--- Backtest Finished ---")
 
     def report(self):
         """
         Generates a detailed performance report using quantstats.
         """
-        if self.equity_curve is None:
-            print("❌ Please run the backtest first using .run()")
+        if self.equity_curve is None or self.equity_curve.empty:
+            log.error("❌ Equity curve is empty. Cannot generate report.")
             return
 
-        print("\n--- Generating Performance Report ---")
-        
-        # --- FIX: Set a default font family to avoid errors in environments without Arial ---
-        try:
-            matplotlib.rcParams['font.family'] = 'sans-serif'
-            print("Font family set to 'sans-serif' to avoid font errors.")
-        except Exception as e:
-            print(f"⚠️ Could not set font family: {e}")
-
+        log.info("\n--- Generating Performance Report ---")
         qs.extend_pandas()
-        
-        # quantstats requires percentage returns, not absolute equity values
         returns = self.equity_curve.pct_change().fillna(0)
-        
-        # Use the asset's own returns as the benchmark (Buy and Hold strategy)
-        benchmark = self.data['close_price'].pct_change().fillna(0)
 
-        # --- FIX: Convert timezone-aware index to timezone-naive for quantstats ---
+        if returns.std() == 0:
+            log.warning("⚠️ No trades were executed. Strategy returns are flat.")
+            log.warning("   A performance report cannot be generated.")
+            print("\n--- Basic Stats ---")
+            print(f"Initial Capital: ${self.initial_capital:,.2f}")
+            print(f"Final Equity:    ${self.equity_curve.iloc[-1]:,.2f}")
+            print(f"Trades Made:     {len([t for t in self.trades if t['type'] in ['buy', 'sell_short']])}")
+            print("---------------------\n")
+            return
+
+        try:
+            matplotlib.use('Agg')
+            matplotlib.rcParams['font.family'] = 'sans-serif'
+        except Exception as e:
+            log.warning(f"⚠️ Could not set font family: {e}")
+            
+        benchmark_raw = self.data['Close'].pct_change().fillna(0)
+        benchmark = benchmark_raw.reindex(returns.index).fillna(0)
         returns.index = returns.index.tz_localize(None)
         benchmark.index = benchmark.index.tz_localize(None)
 
-        # Generate and save the report as an HTML file
-        report_filename = 'backtest_report.html'
-        qs.reports.html(returns, benchmark=benchmark, output=report_filename, title='Trend Following Strategy (MA Crossover)')
+        # --- CHANGE: Define output directory and construct full file path ---
+        output_dir = 'output'
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+            log.info(f"Created directory: {output_dir}")
+
+        report_filename = 'adaptive_trend_rider_report.html'
+        report_filepath = os.path.join(output_dir, report_filename)
         
-        print(f"✅ Full performance report saved as '{report_filename}'.")
-        print("You can download this file and open it in your browser for detailed stats and charts.")
+        qs.reports.html(returns, benchmark=benchmark, output=report_filepath, title='Adaptive Trend Rider Strategy (15-Min Resampled)')
+        
+        log.info(f"✅ Full performance report saved as '{report_filepath}'.")
 
 
 if __name__ == '__main__':
-    print("--- Starting Trend-Following Strategy Backtest ---")
-    print("NOTE: This script uses the 'quantstats' library. If you don't have it, please install it: pip install quantstats")
+    log.info("--- Starting Adaptive Trend Rider Strategy Backtest (15-Min Resampled) ---")
     
-    # 1. Fetch historical data from the database
-    data_df = get_data_from_db()
+    data_df = db_utils.fetch_resampled_candles_and_indicators(
+        source_candles_table=config.CANDLES_TABLE_NAME,
+        source_indicators_table=config.INDICATORS_TABLE_NAME,
+        interval=config.RESAMPLE_INTERVAL,
+        limit=config.DATA_LIMIT 
+    )
 
     if data_df is not None and not data_df.empty:
-        # 2. Define strategy parameters
-        strategy_params = {'fast_ma': 20, 'slow_ma': 50}
-        
-        # 3. Initialize and run the backtester
         backtester = Backtester(
             data=data_df,
-            strategy_class=MovingAverageCrossover,
-            params=strategy_params,
-            initial_capital=10000.0,
-            commission=0.001 # 0.1%
+            initial_capital=config.INITIAL_CAPITAL,
+            commission=config.COMMISSION_PCT,
+            risk_per_trade=config.RISK_PER_TRADE_PCT,
+            atr_stop_multiplier=config.ATR_STOP_MULTIPLIER,
+            rsi_buy_zone=config.RSI_BUY_ZONE,
+            rsi_sell_zone=config.RSI_SELL_ZONE,
+            adx_threshold=config.ADX_THRESHOLD,
+            verbose=False, # This can remain a direct parameter for easy debugging
+            max_position_pct=config.MAX_POSITION_PCT
+        )
+
+    if data_df is not None and not data_df.empty:
+        backtester = Backtester(
+            data=data_df,
+            initial_capital=1000000.0,
+            commission=0.001,
+            risk_per_trade=0.02,
+            atr_stop_multiplier=2.5,
+            rsi_buy_zone=(55, 70),
+            rsi_sell_zone=(30, 45),
+            adx_threshold=22,
+            verbose=False, # Set to False now that it should be working
+            max_position_pct=0.25
         )
         backtester.run()
-        
-        # 4. Generate and save the performance report
         backtester.report()
     else:
-        print("\nCould not fetch data. Exiting backtest.")
+        log.error(f"Could not fetch and resample data from {SOURCE_CANDLES_TABLE}. Exiting backtest.")
+        log.error("Please ensure you have 1-minute data in your database.")

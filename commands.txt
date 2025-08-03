@@ -1,0 +1,16 @@
+# docker
+docker-compose down
+docker compose up -d --build
+
+# database
+docker exec cqf-final-project-db-1 pg_dump -U fbcalderaro -d crypto_trading -F c > ./db-backup/latest.dump
+docker exec -it cqf-final-project-db-1 pg_restore -h localhost -U fbcalderaro -d crypto_trading -v --clean /db-backups/latest.dump
+
+# git
+git clone git@github.com:fbcalderaro/cqf-final-project.git
+git add .
+git commit -m "Comment"
+git push origin main
+
+# scripts
+docker exec -it cqf-final-project-app-1 python /app/python-scripts/binance_get_data.py

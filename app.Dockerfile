@@ -1,7 +1,8 @@
 # Start from a Python base image
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+# Install system dependencies with the correct font package name
+RUN apt-get update && apt-get install -y git fontconfig fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
 
 # Set the working directory
 WORKDIR /app
