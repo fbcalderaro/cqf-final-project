@@ -15,6 +15,7 @@ DEFAULT_START_DATE = datetime.strptime(BINANCE_CONFIG.get('default_start_date'),
 
 # --- BINANCE API Section ---
 BINANCE_API_CONFIG = config['BINANCE_API']
+USE_TESTNET = BINANCE_API_CONFIG.getboolean('use_testnet', fallback=True)
 API_KEY = os.environ.get('BINANCE_KEY_TEST', BINANCE_API_CONFIG.get('api_key'))
 API_SECRET = os.environ.get('BINANCE_SECRET_TEST', BINANCE_API_CONFIG.get('api_secret'))
 

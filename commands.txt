@@ -18,3 +18,7 @@ docker exec -it cqf-final-project-app-1 python /app/python-scripts/backfill_indi
 docker exec -it cqf-final-project-app-1 python /app/python-scripts/backtest.py
 docker exec -it cqf-final-project-app-1 python /app/python-scripts/charts.py --start 2024-01-01 --end 2024-01-01
 docker exec -it cqf-final-project-app-1 python /app/python-scripts/broker.py
+
+docker exec -it cqf-final-project-app-1 python /app/trading_system/data_ingestion.py
+docker exec -it cqf-final-project-app-1 python /app/trading_system/backtest.py
+docker exec -it cqf-final-project-app-1 python /app/trading_system/trader.py

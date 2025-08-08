@@ -1,154 +1,125 @@
-# broker.py
-#
-# First, ensure you have the necessary libraries installed:
-# pip install python-binance python-dotenv
-
-import common
-import config
 from binance.client import Client
-from binance.exceptions import BinanceAPIException, BinanceRequestException
+from binance.exceptions import BinanceAPIException
+import config
+from common import log
 
-# This will hold our client instance after successful initialization
-client = None
-
-try:
-    # Initialize the client using the keys from your config.py (which reads from .env)
-    # The `testnet=True` flag is crucial for connecting to the Binance Testnet.
-    common.log.info("Attempting to connect to Binance Testnet...")
-    client = Client(config.API_KEY, config.API_SECRET, testnet=True)
-
-    # Check the connection by pinging the server
-    client.ping()
-    # Check server time to ensure sync
-    server_time = client.get_server_time()
-    common.log.info(f"✅ Successfully connected to Binance Testnet. Server time: {server_time}")
-
-except (BinanceAPIException, BinanceRequestException) as e:
-    common.log.error(f"❌ Binance API Error: Failed to connect or validate credentials. Please check your .env file. Error: {e}")
-except Exception as e:
-    common.log.error(f"❌ An unexpected error occurred during client initialization: {e}")
-
-
-def get_account_balances():
+class Broker:
     """
-    Retrieves and logs the balances of all assets in the testnet account
-    that have a positive balance.
+    Handles all interactions with the Binance API for order execution and account management.
     """
-    if not client:
-        common.log.error("Cannot get balances: Binance client is not initialized.")
-        return None
-    try:
-        common.log.info("--- Getting Account Balances ---")
-        account_info = client.get_account()
-        balances = account_info.get('balances', [])
+    def __init__(self):
+        """
+        Initializes the Binance client using API keys from the configuration.
+        """
+        log.info("Initializing Broker...")
+        if not config.API_KEY or not config.API_SECRET:
+            raise ValueError("Binance API keys must be set in the environment variables.")
         
-        positive_balances = []
-        for balance in balances:
-            free = float(balance['free'])
-            locked = float(balance['locked'])
-            if free > 0 or locked > 0:
-                positive_balances.append(balance)
-                common.log.info(f"- Asset: {balance['asset']}, Free: {balance['free']}, Locked: {balance['locked']}")
-        
-        if not positive_balances:
-            common.log.info("No assets with a positive balance found.")
-            
-        return positive_balances
-    except (BinanceAPIException, BinanceRequestException) as e:
-        common.log.error(f"❌ Error fetching account balances: {e}")
-        return None
+        masked_key = f"{config.API_KEY[:5]}...{config.API_KEY[-5:]}"
+        log.info(f"Attempting to connect with API Key: {masked_key}")
+
+        try:
+            # --- PERMANENT FIX: Use the simple, direct connection from your working broker.py ---
+            # This is the proven method.
+            log.info("Attempting to connect to Binance Testnet...")
+            self.client = Client(config.API_KEY, config.API_SECRET, testnet=True)
+
+            # Test connection
+            self.client.ping()
+            server_time = self.client.get_server_time()
+            log.info(f"✅ Successfully connected to Binance Testnet. Server time: {server_time}")
+            log.info(f"   Client is connected to API endpoint: {self.client.API_URL}")
+
+        except BinanceAPIException as e:
+            log.error(f"❌ Binance API Exception during initialization: {e}")
+            log.error("    Please check that your TESTNET API keys are correct and have the right permissions.")
+            raise
+        except Exception as e:
+            log.error(f"❌ An unexpected error occurred during broker initialization: {e}")
+            raise
+
+    def get_asset_balance(self, asset):
+        """
+        Retrieves the free balance for a specific asset.
+        """
+        try:
+            balance = self.client.get_asset_balance(asset=asset)
+            return float(balance['free']) if balance else 0.0
+        except BinanceAPIException as e:
+            log.error(f"❌ Error fetching balance for {asset}: {e}")
+            return 0.0
+
+    def get_open_positions(self, symbol):
+        """
+        Checks for an open position for a given symbol.
+        """
+        base_asset = symbol.replace('USDT', '')
+        min_position_amount = 0.0001 
+        balance = self.get_asset_balance(base_asset)
+        return balance if balance > min_position_amount else 0.0
+
+    def place_market_order(self, symbol, side, quantity):
+        """
+        Places a market order on Binance.
+        """
+        log.info(f"Attempting to place a {side} market order for {quantity} {symbol}...")
+        try:
+            order = self.client.create_order(
+                symbol=symbol,
+                side=side,
+                type=Client.ORDER_TYPE_MARKET,
+                quantity=quantity
+            )
+            log.info(f"✅ Market order placed successfully: {order}")
+            return order
+        except BinanceAPIException as e:
+            log.error(f"❌ Binance API Exception while placing order: {e}")
+            return None
+        except Exception as e:
+            log.error(f"❌ An unexpected error occurred while placing order: {e}")
+            return None
+
+    def place_stop_loss_order(self, symbol, side, quantity, stop_price):
+        """
+        Places a STOP_LOSS_LIMIT order.
+        """
+        log.info(f"Attempting to place a {side} STOP_LOSS order for {quantity} {symbol} at trigger price {stop_price}...")
+        try:
+            if side == Client.SIDE_SELL:
+                limit_price = stop_price * 0.998
+            else: # BUY
+                limit_price = stop_price * 1.002
+
+            order = self.client.create_order(
+                symbol=symbol,
+                side=side,
+                type=Client.ORDER_TYPE_STOP_LOSS_LIMIT,
+                quantity=quantity,
+                timeInForce=Client.TIME_IN_FORCE_GTC,
+                stopPrice=f'{stop_price:.2f}',
+                price=f'{limit_price:.2f}'
+            )
+            log.info(f"✅ Stop-loss order placed successfully: {order}")
+            return order
+        except BinanceAPIException as e:
+            log.error(f"❌ Binance API Exception while placing stop-loss: {e}")
+            return None
 
 
-def place_market_order(symbol, side, quantity):
-    """
-    Places a market order on the Binance Testnet.
-
-    :param symbol: The trading pair (e.g., 'BTCUSDT').
-    :param side: The order side ('BUY' or 'SELL').
-    :param quantity: The amount of the asset to trade.
-    :return: The order response from Binance or None if it fails.
-    """
-    if not client:
-        common.log.error("Cannot place order: Binance client is not initialized.")
-        return None
-        
-    side = side.upper()
-    if side not in ['BUY', 'SELL']:
-        common.log.error(f"Invalid order side '{side}'. Must be 'BUY' or 'SELL'.")
-        return None
-
-    try:
-        common.log.info(f"Attempting to place a {side} order for {quantity} {symbol}...")
-        
-        if side == 'BUY':
-            order = client.order_market_buy(symbol=symbol, quantity=quantity)
-        else: # SELL
-            order = client.order_market_sell(symbol=symbol, quantity=quantity)
-            
-        common.log.info("✅ Order successfully placed:")
-        common.log.info(order)
-        return order
-    except (BinanceAPIException, BinanceRequestException) as e:
-        common.log.error(f"❌ Error placing market order for {symbol}: {e}")
-        return None
-
-def get_open_orders(symbol=None):
-    """
-    Retrieves all open orders for a specific symbol or all symbols.
-
-    :param symbol: (Optional) The trading pair to filter by (e.g., 'BTCUSDT').
-    :return: A list of open orders or None if an error occurs.
-    """
-    if not client:
-        common.log.error("Cannot get open orders: Binance client is not initialized.")
-        return None
-    try:
-        log_msg = "--- Getting all open orders ---"
-        if symbol:
-            log_msg = f"--- Getting open orders for {symbol} ---"
-        common.log.info(log_msg)
-
-        open_orders = client.get_open_orders(symbol=symbol)
-        if not open_orders:
-            common.log.info("No open orders found.")
-        else:
-            for order in open_orders:
-                common.log.info(order)
-        return open_orders
-    except (BinanceAPIException, BinanceRequestException) as e:
-        common.log.error(f"❌ Error fetching open orders: {e}")
-        return None
-
-# --- Main execution block to test the functions ---
 if __name__ == '__main__':
-    # We only proceed if the client was successfully initialized.
-    if client:
-        common.log.info("\n--- Running Broker Functions ---")
-
-        # 1. Get account balances
-        get_account_balances()
-
-        # 2. Get open orders for the symbol from config.ini
-        get_open_orders(symbol=config.SYMBOL)
-
-        # 3. Example of placing a market BUY order
-        # IMPORTANT: Uncomment the following lines to place a test order.
-        #
-        # common.log.info("\n--- Placing a test BUY order ---")
-        # buy_quantity = 0.001  # Example: buy 0.001 BTC on the testnet
-        # place_market_order(config.SYMBOL, 'BUY', buy_quantity)
-        
-        # 4. Example of placing a market SELL order
-        # IMPORTANT: Uncomment the following lines to place a test order.
-        #
-        # common.log.info("\n--- Placing a test SELL order ---")
-        # sell_quantity = 0.001 # Example: sell 0.001 BTC on the testnet
-        # place_market_order(config.SYMBOL, 'SELL', sell_quantity)
-
-        # 5. Check balances again after placing orders
-        # common.log.info("\n--- Checking balances again ---")
-        # get_account_balances()
-
-        common.log.info("\n--- Broker script finished ---")
+    log.info("--- Running Broker Module Sanity Check ---")
+    
+    if not config.API_KEY or not config.API_SECRET:
+        log.warning("Skipping sanity check: API keys are not configured.")
     else:
-        common.log.error("Broker script could not run because the Binance client failed to initialize.")
+        try:
+            broker = Broker()
+            
+            usdt_balance = broker.get_asset_balance('USDT')
+            log.info(f"USDT Balance: {usdt_balance}")
+            
+            btc_position = broker.get_open_positions('BTCUSDT')
+            log.info(f"Current BTC Position: {btc_position}")
+
+        except Exception as e:
+            log.error(f"An error occurred during the sanity check: {e}")

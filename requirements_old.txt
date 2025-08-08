@@ -1,0 +1,15 @@
+connectorx
+IPython
+pandas
+plotly
+polars
+polars-ta
+psycopg2-binary
+pyarrow
+python-binance
+python-decouple
+PyYAML
+quantstats
+requests
+sqlalchemy
+websocket-client

@@ -1,0 +1,45 @@
+# /trading_system/config/config.yaml
+
+system:
+  initial_cash: 100000.0
+  commission_pct: 0.001
+  risk_per_trade_pct: 0.01
+  database:
+    host: "db"
+    port: 5432
+    name: "crypto_data"
+    user: "user"
+    password: "password"
+
+# --- NEW: Data Ingestion Configuration ---
+data_ingestion:
+  # List of assets to track and store data for. The script will create a table for each.
+  assets_to_track:
+    - "BTC-USDT"
+    - "ETH-USDT" # Example of how to add another asset
+  # The earliest date to backfill historical data from if the database is empty.
+  historical_start_date: "2020-01-01"
+  # The interval to fetch and store. Should be the lowest granularity available.
+  base_interval: "1m"
+
+strategies:
+  - name: "Momentum_BTC_1h"
+    class: "MomentumStrategy"
+    module: "strategies.momentum_strategy"
+    asset: "BTC-USDT"
+    timeframe: "1h"
+    params:
+      short_window: 20
+      long_window: 50
+
+  - name: "MeanReversion_BTC_1h" # Example of a strategy on a different asset
+    class: "MeanReversionBB"
+    module: "strategies.mean_reversion_bb"
+    asset: "BTC-USDT"
+    timeframe: "1h"
+    params:
+      bb_period: 20
+      bb_std_dev: 2.0
+      use_rsi_filter: true
+      rsi_period: 14
+      rsi_oversold: 30
