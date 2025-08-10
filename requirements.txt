@@ -5,6 +5,11 @@ polars
 pandas-ta==0.3.14b0
 backtesting
 quantstats
+plotly
+pyarrow
+pykalman
+python-binance
 PyYAML
+statsmodels
 websocket-client
 requests

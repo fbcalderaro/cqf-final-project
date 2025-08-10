@@ -1,8 +1,11 @@
 # Start from a Python base image
 FROM python:3.11-slim
 
-# Install system dependencies with the correct font package name
-RUN apt-get update && apt-get install -y git fontconfig fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
+# Install system dependencies
+# - git: for version control if needed
+# - fontconfig, fonts-dejavu-core: for Plotly chart generation
+# - procps: provides utilities like 'ps', 'pkill', and 'top' for process management
+RUN apt-get update && apt-get install -y git fontconfig fonts-dejavu-core procps && rm -rf /var/lib/apt/lists/*
 
 # Set the working directory
 WORKDIR /app

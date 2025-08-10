@@ -31,26 +31,74 @@ class DataIngestor:
         self.ingestion_config = config['data_ingestion']
         self.assets = self.ingestion_config['assets_to_track']
         self.interval = self.ingestion_config['base_interval']
+        self.websockets = [] # To hold active websocket connections for graceful shutdown
+
+    def _is_candle_data_valid(self, candle_data: dict, asset: str) -> bool:
+        """
+        Performs data quality checks on a single candle received from the WebSocket.
+        """
+        k = candle_data.get('k')
+
+        # 1. Structural Integrity Check
+        if not isinstance(k, dict):
+            log.warning(f"Malformed data for {asset}: 'k' key is missing or not a dictionary. Skipping.")
+            return False
+
+        # 2. Essential Fields Check
+        required_fields = ['t', 'o', 'h', 'l', 'c', 'v']
+        if not all(field in k for field in required_fields):
+            log.warning(f"Malformed data for {asset}: One or more required fields are missing. Skipping.")
+            return False
+
+        try:
+            # Convert to float for logical checks
+            o, h, l, c = float(k['o']), float(k['h']), float(k['l']), float(k['c'])
+
+            # 3. Logical Consistency Check
+            if not (h >= o and h >= l and h >= c and l <= o and l <= h and l <= c):
+                log.warning(f"Inconsistent candle data for {asset}: High={h}, Low={l}, Open={o}, Close={c}. Skipping.")
+                return False
+
+        except (ValueError, TypeError):
+            log.warning(f"Malformed data for {asset}: OHLC values are not valid numbers. Skipping.")
+            return False
+        
+        return True
 
     def _fetch_and_store(self, conn, asset, table_name, start_dt):
         current_dt = start_dt
-        while current_dt < datetime.now(timezone.utc):
+        max_iterations = 10000 
+        iterations = 0
+
+        while current_dt < datetime.now(timezone.utc) and iterations < max_iterations:
             params = {'symbol': asset.replace('-', ''), 'interval': self.interval, 'startTime': int(current_dt.timestamp() * 1000), 'limit': 1000}
             try:
                 log.info(f"⬇️  Fetching up to 1000 records for {asset} from {current_dt.strftime('%Y-%m-%d %H:%M:%S')}...")
                 response = requests.get(BINANCE_API_URL, params=params)
                 response.raise_for_status()
                 data = response.json()
-                if not data: break
+                
+                if not data:
+                    log.info(f"API returned no data. Backfill for {asset} is complete.")
+                    break
+                
                 fetched_count = len(data)
                 inserted_count = db_utils.insert_batch_data(conn, data, table_name)
                 log.info(f"    ✅ Fetched {fetched_count} records, 💾 Inserted {inserted_count} new records.")
+
+                if fetched_count > 0 and inserted_count == 0:
+                    log.info(f"Gap starting at {start_dt.strftime('%Y-%m-%d %H:%M:%S')} for {asset} has been filled.")
+                    break
+                
                 if fetched_count < 1000:
                     log.info(f"API returned fewer than 1000 records. Backfill for {asset} is complete.")
                     break
+                
                 last_ts_ms = data[-1][0]
                 current_dt = datetime.fromtimestamp(last_ts_ms / 1000, tz=timezone.utc) + timedelta(minutes=1)
+                iterations += 1
                 time.sleep(0.5)
+
             except requests.exceptions.RequestException as e:
                 log.error(f"Error fetching data from Binance API: {e}")
                 time.sleep(10)
@@ -83,6 +131,23 @@ class DataIngestor:
         tasks = [self.listen_to_asset(asset) for asset in self.assets]
         await asyncio.gather(*tasks)
 
+    def on_message(self, ws, message, asset, conn):
+        """
+        Callback for WebSocket messages. Validates and then upserts candle data.
+        """
+        json_message = json.loads(message)
+        k = json_message.get('k', {})
+
+        # Only process closed candles
+        if not k.get('x'):
+            return
+
+        # --- NEW: Perform data quality check before inserting ---
+        if self._is_candle_data_valid(json_message, asset):
+            db_utils.upsert_realtime_candle(conn, json_message, f"{asset.replace('-', '').lower()}_{self.interval}_candles")
+        else:
+            log.warning(f"Skipping insertion for {asset} due to data quality issues.")
+
     async def listen_to_asset(self, asset: str):
         """
         Creates and manages a WebSocket connection for a single asset,
@@ -96,21 +161,15 @@ class DataIngestor:
             log.error(f"Cannot start listener for {asset}, DB connection failed.")
             return
 
-        def on_message(ws, message):
-            json_message = json.loads(message)
-            db_utils.upsert_realtime_candle(conn, json_message, table_name)
-
-        ws_app = websocket.WebSocketApp(socket_url, on_message=on_message, on_error=lambda ws, err: log.error(f"WS Error for {asset}: {err}"))
+        ws_app = websocket.WebSocketApp(
+            socket_url, 
+            on_message=lambda ws, msg: self.on_message(ws, msg, asset, conn)
+        )
         
-        # --- CORRECTED CONCURRENCY LOGIC ---
-        # Get the current asyncio event loop
+        self.websockets.append(ws_app)
         loop = asyncio.get_event_loop()
         log.info(f"Starting WebSocket listener for {asset} in a background thread...")
-        # Use run_in_executor to run the blocking call without blocking the event loop
         await loop.run_in_executor(None, ws_app.run_forever)
-        # ---
-
-        # This part will only be reached if run_forever exits
         conn.close()
 
     def run_sync(self):
@@ -120,9 +179,15 @@ class DataIngestor:
             log.info("--- Backfill complete. Transitioning to live data ingestion... ---")
             asyncio.run(self.run_live())
         except KeyboardInterrupt:
-            log.info("--- Shutdown signal received during live ingestion. ---")
+            log.info("\n--- Shutdown signal received during live ingestion. ---")
         except Exception as e:
             log.error(f"A critical error occurred during the live ingestion phase: {e}", exc_info=True)
+        finally:
+            log.info("--- Closing all WebSocket connections... ---")
+            for ws in self.websockets:
+                if ws and ws.sock and ws.sock.connected:
+                    ws.close()
+            log.info("--- All connections closed. Exiting. ---")
 
 def main():
     parser = argparse.ArgumentParser(description="Data Ingestion Engine for the Trading System.")

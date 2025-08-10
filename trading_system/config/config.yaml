@@ -1,9 +1,12 @@
 # /trading_system/config/config.yaml
 
 system:
-  initial_cash: 100000.0
-  commission_pct: 0.001
-  risk_per_trade_pct: 0.01
+  initial_cash: 100000.0 # Starting cash for the trading system.
+  commission_pct: 0.001 # Percentage commission charged on each trade.
+  risk_per_trade_pct: 0.01 # Percentage of total equity to risk per trade.
+  reconciliation_interval_seconds: 60  # How often to check for new trades and update positions.
+  trading_mode: "live"  # Options: "live" or "paper"
+
   database:
     host: "db"
     port: 5432
@@ -11,35 +14,282 @@ system:
     user: "user"
     password: "password"
 
-# --- NEW: Data Ingestion Configuration ---
+# --- Data Ingestion Configuration ---
 data_ingestion:
-  # List of assets to track and store data for. The script will create a table for each.
-  assets_to_track:
+  assets_to_track: # List of assets to track and store data for. The script will create a table for each.
     - "BTC-USDT"
-    - "ETH-USDT" # Example of how to add another asset
-  # The earliest date to backfill historical data from if the database is empty.
-  historical_start_date: "2020-01-01"
-  # The interval to fetch and store. Should be the lowest granularity available.
-  base_interval: "1m"
+    - "ETH-USDT" # Add more assets as needed
+  historical_start_date: "2020-01-01" # The earliest date to backfill historical data from if the database is empty.
+  base_interval: "1m" # The interval to fetch and store. Should be the lowest granularity available.
 
+# --- Backtesting Configuration ---
+backtest:
+  # start_date: '2022-01-01T00:00:00'
+  # end_date: '2024-12-31T23:59:59'
+  start_date: '2025-01-01T00:00:00'
+  end_date: '2025-08-09T23:59:59'
+  generate_individual_reports: true
+
+# --- Trading Strategies Configuration ---
 strategies:
-  - name: "Momentum_BTC_1h"
+
+  # --- Test Strategy ---
+  # Use this strategy to verify the live trading engine is working.
+  # It will generate a BUY signal, then a SELL signal, every 'signal_interval' bars.
+  # - name: "Test_Signal_Generator_1"
+  #   class: "TestStrategy"
+  #   module: "strategies.test_strategy" 
+  #   asset: "BTC-USDT"
+  #   timeframe: "1m"
+  #   cash_allocation_pct: 10 # Allocate X% of total cash to this strategy
+  #   params:
+  #     signal_interval: 1 # Generate a signal every 1 bars of 'timeframe'
+
+  # - name: "Test_Signal_Generator_2"
+  #   class: "TestStrategy"
+  #   module: "strategies.test_strategy" 
+  #   asset: "ETH-USDT"
+  #   timeframe: "1m"
+  #   cash_allocation_pct: 10 # Allocate X% of total cash to this strategy
+  #   params:
+  #     signal_interval: 1 # Generate a signal every 1 bars of 'timeframe'
+
+  # ===================================================================
+  #  Momentum Strategy Variations (for BTC-USDT on 15m)
+  # ===================================================================
+
+  # # --- Base Strategy (Your Current Config) ---
+  # - name: "Momentum_Base"
+  #   class: "MomentumStrategy"
+  #   module: "strategies.momentum_strategy"
+  #   asset: "BTC-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     ma_type: "ema"
+  #     short_window: 20
+  #     long_window: 50
+  #     use_adx_filter: true
+  #     adx_threshold: 25.0
+  #     use_macd_filter: true
+
+  # # --- Variation M1: Faster & More Responsive ---
+  # # Hypothesis: The base strategy is too slow. A faster crossover will catch trends earlier.
+  # - name: "Momentum_Faster"
+  #   class: "MomentumStrategy"
+  #   module: "strategies.momentum_strategy"
+  #   asset: "BTC-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     ma_type: "ema"
+  #     short_window: 12      # Faster
+  #     long_window: 26       # Faster
+  #     use_adx_filter: true
+  #     adx_threshold: 22.0   # Slightly lower threshold
+  #     use_macd_filter: true
+
+  # --- Variation M2: Slower & More Conservative ---
+  # Hypothesis: The base strategy is too noisy. A slower crossover will only catch major, more reliable trends.
+  - name: "Momentum_Slower"
     class: "MomentumStrategy"
     module: "strategies.momentum_strategy"
     asset: "BTC-USDT"
-    timeframe: "1h"
+    timeframe: "15m"
+    cash_allocation_pct: 40 # Allocate X% of total cash to this strategy
     params:
-      short_window: 20
-      long_window: 50
+      ma_type: "ema"
+      short_window: 50       # Slower
+      long_window: 100       # Slower
+      use_adx_filter: true
+      adx_threshold: 28.0    # Higher threshold for stronger trends
+      use_macd_filter: true
 
-  - name: "MeanReversion_BTC_1h" # Example of a strategy on a different asset
-    class: "MeanReversionBB"
-    module: "strategies.mean_reversion_bb"
-    asset: "BTC-USDT"
-    timeframe: "1h"
+  # # --- Variation M3: No MACD Confirmation ---
+  # # Hypothesis: The MACD filter is too restrictive and might be filtering out good trades.
+  # - name: "Momentum_NoMACD"
+  #   class: "MomentumStrategy"
+  #   module: "strategies.momentum_strategy"
+  #   asset: "BTC-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     ma_type: "ema"
+  #     short_window: 20
+  #     long_window: 50
+  #     use_adx_filter: true
+  #     adx_threshold: 25.0
+  #     use_macd_filter: false # Disabled MACD filter
+
+  # # --- Variation M4: Higher Timeframe ---
+  # # Hypothesis: The strategy might be more profitable and less noisy on a higher timeframe like 1H.
+  # - name: "Momentum_1H"
+  #   class: "MomentumStrategy"
+  #   module: "strategies.momentum_strategy"
+  #   asset: "BTC-USDT"
+  #   timeframe: "1h" # <-- Changed timeframe
+  #   params:
+  #     ma_type: "ema"
+  #     short_window: 20
+  #     long_window: 50
+  #     use_adx_filter: true
+  #     adx_threshold: 25.0
+  #     use_macd_filter: true
+
+
+  # ===================================================================
+  #  Mean Reversion Strategy Variations (for ETH-USDT on 15m)
+  # ===================================================================
+
+  # # --- Base Strategy (Your Current Config) ---
+  # - name: "MeanReversion_Base"
+  #   class: "MeanReversionOU"
+  #   module: "strategies.mean_reversion_ou"
+  #   asset: "ETH-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     lookback_window: 90
+  #     entry_z_score: 2.0
+  #     exit_z_score: 0.3
+  #     kalman_process_noise: 0.00001
+  #     kalman_measurement_noise: 0.0001
+
+  # # --- Variation MR1: More Aggressive Entry ---
+  # # Hypothesis: The base entry is too strict. We can increase trade frequency by entering on smaller deviations.
+  # - name: "MeanReversion_AggressiveEntry"
+  #   class: "MeanReversionOU"
+  #   module: "strategies.mean_reversion_ou"
+  #   asset: "ETH-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     lookback_window: 60      # Shorter window for more volatile Z-score
+  #     entry_z_score: 1.7       # Easier entry
+  #     exit_z_score: 0.5        # Wider exit zone
+  #     kalman_process_noise: 0.00001
+  #     kalman_measurement_noise: 0.0001
+
+  # --- Variation MR2: Quicker Profit Taking ---
+  # Hypothesis: The base strategy holds trades for too long. Exiting sooner will lock in small gains more frequently.
+  - name: "MeanReversion_QuickExit"
+    class: "MeanReversionOU"
+    module: "strategies.mean_reversion_ou"
+    asset: "ETH-USDT"
+    timeframe: "15m"
+    cash_allocation_pct: 40 # Allocate X% of total cash to this strategy
     params:
-      bb_period: 20
-      bb_std_dev: 2.0
-      use_rsi_filter: true
-      rsi_period: 14
-      rsi_oversold: 30
+      lookback_window: 90
+      entry_z_score: 2.0
+      exit_z_score: 0.8        # Much wider exit zone for quick exits
+      kalman_process_noise: 0.00001
+      kalman_measurement_noise: 0.0001
+
+  # # --- Variation MR3: Faster Adapting Mean ---
+  # # Hypothesis: The Kalman filter is too slow. A faster mean will better suit a volatile market.
+  # - name: "MeanReversion_FastMean"
+  #   class: "MeanReversionOU"
+  #   module: "strategies.mean_reversion_ou"
+  #   asset: "ETH-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     lookback_window: 90
+  #     entry_z_score: 2.0
+  #     exit_z_score: 0.3
+  #     kalman_process_noise: 0.00005 # <-- Increased process noise for faster adaptation
+  #     kalman_measurement_noise: 0.0001
+
+  # # --- Variation MR4: High Frequency ---
+  # # Hypothesis: A combination of aggressive settings will create a high-frequency version of the strategy.
+  # - name: "MeanReversion_HighFreq"
+  #   class: "MeanReversionOU"
+  #   module: "strategies.mean_reversion_ou"
+  #   asset: "ETH-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     lookback_window: 45      # Shorter window
+  #     entry_z_score: 1.8       # Easier entry
+  #     exit_z_score: 0.7        # Quicker exit
+  #     kalman_process_noise: 0.00005 # Faster mean
+  #     kalman_measurement_noise: 0.0001
+
+  # # --- Momentum Strategy ---
+  
+  # # Option 1: Your original SMA Crossover (no changes needed)
+  # - name: "Momentum_SMA_Base"
+  #   class: "MomentumStrategy"
+  #   module: "strategies.momentum_strategy"
+  #   asset: "BTC-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     short_window: 20
+  #     long_window: 50
+
+  # # Option 2: A more responsive EMA Crossover
+  # - name: "Momentum_EMA_Base"
+  #   class: "MomentumStrategy"
+  #   module: "strategies.momentum_strategy"
+  #   asset: "BTC-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     ma_type: "ema"  # <-- Use EMA instead of SMA
+  #     short_window: 20
+  #     long_window: 50
+
+  # # Option 3: EMA Crossover with ADX Trend Filter
+  # # This will only enter trades when the trend is strong, avoiding sideways markets.
+  # - name: "Momentum_EMA_ADX"
+  #   class: "MomentumStrategy"
+  #   module: "strategies.momentum_strategy"
+  #   asset: "BTC-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     ma_type: "ema"
+  #     short_window: 20
+  #     long_window: 50
+  #     # --- ADX Filter ---
+  #     use_adx_filter: true
+  #     adx_length: 14
+  #     adx_threshold: 25.0 # Only trade if ADX is above 25
+
+  # Option 4: EMA Crossover with ADX and MACD Filters
+  # The most strict version: requires a strong trend AND MACD confirmation.
+  # - name: "Momentum_EMA_ADX_MACD"
+  #   class: "MomentumStrategy"
+  #   module: "strategies.momentum_strategy"
+  #   asset: "BTC-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     ma_type: "ema"
+  #     short_window: 20
+  #     long_window: 50
+  #     # --- ADX Filter ---
+  #     use_adx_filter: true
+  #     adx_length: 14
+  #     adx_threshold: 25.0
+  #     # --- MACD Filter ---
+  #     use_macd_filter: true
+  #     # You can also customize macd_fast, macd_slow, macd_signal if needed
+
+  # # --- Mean Reversion Strategy ---
+
+  # --- Bollinger Bands Strategy ---
+  # - name: "MeanReversion_BTC_15m" 
+  #   class: "MeanReversionBB"
+  #   module: "strategies.mean_reversion_bb"
+  #   asset: "BTC-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     bb_period: 20
+  #     bb_std_dev: 2.0
+  #     use_rsi_filter: true
+  #     rsi_period: 14
+  #     rsi_oversold: 30
+
+  # --- Ornstein-Uhlenbeck with Kalman Filter Strategy ---
+  # - name: "MeanReversionOU_ETH_15m"
+  #   class: "MeanReversionOU"
+  #   module: "strategies.mean_reversion_ou"
+  #   asset: "ETH-USDT"
+  #   timeframe : "15m"
+  #   params:
+  #     lookback_window: 90 # Rolling window for Z-score calculation 
+  #     entry_z_score: 2.0 # Z-score threshold to enter a position
+  #     exit_z_score: 0.3 # Z-score threshold to exit a position
+  #     kalman_process_noise: 0.00001 # Kalman Filter process noise. Higher value = faster adapting mean.
+  #     kalman_measurement_noise: 0.0001 # Kalman Filter measurement noise. Higher value = smoother mean.
