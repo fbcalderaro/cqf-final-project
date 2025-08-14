@@ -25,22 +25,26 @@ class TestStrategy(Strategy):
 
     def generate_signals(self, data: pd.DataFrame) -> pd.DataFrame:
         """
-        Generates alternating BUY (1) and SELL (-1) signals.
+        Generates alternating BUY (1) and SELL (-1) signals at a fixed interval.
         """
         if not isinstance(data, pd.DataFrame):
             raise ValueError("Input data must be a pandas DataFrame.")
         
+        # Start with a series of all zeros (no signal).
         signals = pd.Series(0, index=data.index, dtype=int)
         
-        # Create an array of indices where signals should be generated
+        # Create an array of the integer locations (iloc) where signals should be generated.
+        # e.g., for interval=5, this will be [5, 10, 15, 20, ...].
         signal_indices = np.arange(self.signal_interval, len(data), self.signal_interval)
         
-        # Determine the signal value (1 or -1) based on whether the signal number is odd or even
-        # (signal_indices // self.signal_interval) -> 1, 2, 3, 4...
-        # % 2 -> 1, 0, 1, 0...
-        # * 2 - 1 -> 1, -1, 1, -1...
+        # Determine the signal value (1 or -1) for each of the indices above.
+        # This clever line of numpy code does the following:
+        # 1. `signal_indices // self.signal_interval`: Creates a sequence [1, 2, 3, 4, ...].
+        # 2. `% 2`: Takes the modulus, resulting in [1, 0, 1, 0, ...].
+        # 3. `np.where(..., 1, -1)`: Maps 1 to a BUY signal (1) and 0 to a SELL signal (-1).
         signal_values = np.where((signal_indices // self.signal_interval) % 2 == 1, 1, -1)
         
+        # Place the generated signal values (1 or -1) at the correct integer locations.
         signals.iloc[signal_indices] = signal_values
         data['signal'] = signals
         return data

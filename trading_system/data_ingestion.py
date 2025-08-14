@@ -142,7 +142,7 @@ class DataIngestor:
         if not k.get('x'):
             return
 
-        # --- NEW: Perform data quality check before inserting ---
+        # --- Perform data quality check before inserting ---
         if self._is_candle_data_valid(json_message, asset):
             db_utils.upsert_realtime_candle(conn, json_message, f"{asset.replace('-', '').lower()}_{self.interval}_candles")
         else:
@@ -172,22 +172,28 @@ class DataIngestor:
         await loop.run_in_executor(None, ws_app.run_forever)
         conn.close()
 
-    def run_sync(self):
+    async def run_sync(self):
+        """
+        Runs a sequential backfill and then immediately starts the live feed for each asset
+        to minimize data gaps.
+        """
         log.info("--- Starting Data Sync Process (Backfill + Live) ---")
-        self.run_backfill()
-        try:
-            log.info("--- Backfill complete. Transitioning to live data ingestion... ---")
-            asyncio.run(self.run_live())
-        except KeyboardInterrupt:
-            log.info("\n--- Shutdown signal received during live ingestion. ---")
-        except Exception as e:
-            log.error(f"A critical error occurred during the live ingestion phase: {e}", exc_info=True)
-        finally:
-            log.info("--- Closing all WebSocket connections... ---")
-            for ws in self.websockets:
-                if ws and ws.sock and ws.sock.connected:
-                    ws.close()
-            log.info("--- All connections closed. Exiting. ---")
+        loop = asyncio.get_event_loop()
+        live_tasks = []
+
+        for asset in self.assets:
+            log.info(f"--- Starting sync for asset: {asset} ---")
+            # Run the blocking backfill operation in a separate thread to not block the event loop
+            await loop.run_in_executor(None, self.backfill_asset, asset)
+            
+            log.info(f"--- Backfill for {asset} complete. Transitioning to live data... ---")
+            # Now that backfill is done, create the live listening task for this asset
+            task = asyncio.create_task(self.listen_to_asset(asset))
+            live_tasks.append(task)
+        
+        log.info("--- All assets have been backfilled and live listeners are running. ---")
+        if live_tasks:
+            await asyncio.gather(*live_tasks)
 
 def main():
     parser = argparse.ArgumentParser(description="Data Ingestion Engine for the Trading System.")
@@ -209,15 +215,24 @@ def main():
     
     ingestor = DataIngestor(config)
 
-    if args.mode == 'backfill':
-        ingestor.run_backfill()
-    elif args.mode == 'live':
-        asyncio.run(ingestor.run_live())
-    elif args.mode == 'sync':
-        ingestor.run_sync()
+    try:
+        if args.mode == 'backfill':
+            ingestor.run_backfill()
+        elif args.mode == 'live':
+            asyncio.run(ingestor.run_live())
+        elif args.mode == 'sync':
+            asyncio.run(ingestor.run_sync())
+    except KeyboardInterrupt:
+        log.info("\n--- Shutdown signal received. ---")
+    except Exception as e:
+        log.error(f"A critical error occurred during execution: {e}", exc_info=True)
+    finally:
+        log.info("--- Closing all WebSocket connections... ---")
+        for ws in ingestor.websockets:
+            if ws and ws.sock and ws.sock.connected:
+                ws.close()
+        log.info("--- All connections closed. Exiting. ---")
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        log.info("--- Shutdown signal received ---")
+    # The top-level try/except is now inside main() for better resource management
+    main()

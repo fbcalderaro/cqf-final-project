@@ -8,6 +8,7 @@ import numpy as np
 from datetime import datetime
 import importlib
 import plotly.graph_objects as go
+import argparse
 from plotly.subplots import make_subplots
 
 # --- Path Correction ---
@@ -28,20 +29,47 @@ class Backtest:
     a detailed individual report.
     """
 
-    def __init__(self, strategy_instance, strategy_config: dict, system_config: dict, backtest_config: dict):
+    def __init__(self, strategy_instance, strategy_config: dict, system_config: dict, backtest_config: dict, period: str):
         self.strategy = strategy_instance
         self.strategy_config = strategy_config
         self.system_config = system_config
         self.backtest_config = backtest_config
-        self.portfolio_manager = PortfolioManager(system_config)
         self.asset = self.strategy_config['asset']
         self.timeframe = self.strategy_config.get('timeframe', '1h')
-        self.start_date = datetime.fromisoformat(self.backtest_config['start_date'])
-        self.end_date = datetime.fromisoformat(self.backtest_config['end_date'])
+
+        initial_cash = self.system_config.get('initial_cash', 100000.0)
+
+        # Initialize the master portfolio manager for the backtest
+        self.portfolio_manager = PortfolioManager(
+            system_config=self.system_config,
+            initial_cash=initial_cash,
+            initial_positions={}, # Backtests start with no positions
+            relevant_assets={self.asset}
+        )
+
+        # For a backtest, the single strategy gets 100% of the initial cash.
+        self.portfolio_manager.register_strategy(
+            strategy_name=self.strategy.name,
+            config=self.strategy_config,
+            initial_equity=initial_cash
+        )
+
+        # Get the specific sub-portfolio for this strategy to use in the simulation
+        self.strategy_portfolio = self.portfolio_manager.get_strategy_portfolio(self.strategy.name)
+
+        # --- NEW: Select dates based on period ---
+        self.period = period
+        try:
+            period_dates = self.backtest_config['periods'][self.period]
+            self.start_date = datetime.fromisoformat(period_dates['start_date'])
+            self.end_date = datetime.fromisoformat(period_dates['end_date'])
+        except KeyError:
+            log.error(f"Backtest period '{self.period}' not found in config.yaml under backtest.periods.")
+            raise ValueError(f"Invalid backtest period: {self.period}")
         
         os.makedirs(OUTPUT_DIR, exist_ok=True)
         
-        log.info(f"--- Initializing Backtest for '{self.strategy.name}' on {self.asset} ---")
+        log.info(f"--- Initializing Backtest for '{self.strategy.name}' on {self.asset} ({self.period.replace('_', ' ').title()}) ---")
 
     def _load_and_prepare_data(self) -> pd.DataFrame:
         log.info(f"Loading 1-minute data for {self.asset}...")
@@ -83,26 +111,58 @@ class Backtest:
         return results
 
     def _run_simulation(self, signals_df: pd.DataFrame):
-        position = 0
+        position = 0 # Simple state tracker: 0 for flat, 1 for in-position
         for i in range(len(signals_df)):
             timestamp = signals_df.index[i]
             current_signal = signals_df['signal'].iloc[i]
+            # Assume trade executes at the open of the next bar
             trade_price = signals_df['Open'].iloc[i+1] if i + 1 < len(signals_df) else signals_df['Close'].iloc[i]
             
-            self.portfolio_manager.update_market_value(self.asset, trade_price)
+            # Update market values for the master portfolio, which also updates sub-portfolios
+            self.portfolio_manager.update_market_values({self.asset: trade_price})
 
             if current_signal == 1 and position == 0:
-                risk_amount = self.portfolio_manager.calculate_position_size(self.asset)
+                # Use the strategy's sub-portfolio to calculate position size
+                risk_amount = self.strategy_portfolio.calculate_position_size()
                 if risk_amount > 0:
                     quantity = risk_amount / trade_price
-                    self.portfolio_manager.on_fill(timestamp, self.asset, quantity, trade_price, 'BUY')
+                    
+                    # Simulate fill details (slippage, commission)
+                    commission_pct = self.system_config.get('commission_pct', 0.001)
+                    slippage_pct = self.system_config.get('paper_slippage_pct', 0.0005)
+                    fill_price = trade_price * (1 + slippage_pct)
+                    trade_value = quantity * fill_price
+                    commission = trade_value * commission_pct
+                    trade_value_quote = trade_value + commission
+
+                    # Call the master portfolio manager's on_fill method with all required arguments
+                    self.portfolio_manager.on_fill(
+                        strategy_name=self.strategy.name,
+                        timestamp=timestamp, asset=self.asset, quantity=quantity,
+                        fill_price=fill_price, direction='BUY', trade_value_quote=trade_value_quote
+                    )
                     position = 1
             elif current_signal == -1 and position == 1:
-                quantity_to_sell = self.portfolio_manager.positions.get(self.asset, 0)
+                # Get quantity to sell from the strategy's sub-portfolio
+                quantity_to_sell = self.strategy_portfolio.positions.get(self.asset, 0)
                 if quantity_to_sell > 0:
-                    self.portfolio_manager.on_fill(timestamp, self.asset, quantity_to_sell, trade_price, 'SELL')
+                    # Simulate fill details
+                    commission_pct = self.system_config.get('commission_pct', 0.001)
+                    slippage_pct = self.system_config.get('paper_slippage_pct', 0.0005)
+                    fill_price = trade_price * (1 - slippage_pct)
+                    trade_value = quantity_to_sell * fill_price
+                    commission = trade_value * commission_pct
+                    trade_value_quote = trade_value - commission
+
+                    self.portfolio_manager.on_fill(
+                        strategy_name=self.strategy.name,
+                        timestamp=timestamp, asset=self.asset, quantity=quantity_to_sell,
+                        fill_price=fill_price, direction='SELL', trade_value_quote=trade_value_quote
+                    )
                     position = 0
 
+            # The master PM's equity curve is updated on_fill. For non-trade bars, we need to record the equity too.
+            # This ensures the equity curve has a point for every bar in the backtest.
             self.portfolio_manager.equity_curve.append((timestamp, self.portfolio_manager.get_total_equity()))
 
     def _calculate_performance_metrics(self) -> dict | None:
@@ -141,7 +201,7 @@ class Backtest:
             'Total Return %': total_return_pct,
             'Max Drawdown %': max_drawdown_pct,
             'Sharpe Ratio': sharpe_ratio,
-            'Total Trades': len(self.portfolio_manager.trade_log),
+            'Total Trades': len(self.strategy_portfolio.trade_log),
             'Total P&L $': final_equity - initial_equity,
             'Equity Curve': equity_df,
             'Drawdown Curve': drawdown
@@ -174,25 +234,25 @@ class Backtest:
         fig.add_trace(go.Scatter(x=results['Drawdown Curve'].index, y=results['Drawdown Curve'] * 100, name='Drawdown', fill='tozeroy', line=dict(color='red')), row=2, col=1)
         fig.add_trace(go.Scatter(x=signals_df.index, y=signals_df['Close'], name='Close Price', line=dict(color='gray', width=1)), row=3, col=1)
         
-        trade_log_df = pd.DataFrame(self.portfolio_manager.trade_log)
+        trade_log_df = pd.DataFrame(self.strategy_portfolio.trade_log)
         if not trade_log_df.empty:
             buy_trades = trade_log_df[trade_log_df['direction'] == 'BUY']
             sell_trades = trade_log_df[trade_log_df['direction'] == 'SELL']
             fig.add_trace(go.Scatter(x=buy_trades['timestamp'], y=buy_trades['price'], name='Buy', mode='markers', marker=dict(color='lime', size=10, symbol='triangle-up')), row=3, col=1)
             fig.add_trace(go.Scatter(x=sell_trades['timestamp'], y=sell_trades['price'], name='Sell', mode='markers', marker=dict(color='magenta', size=10, symbol='triangle-down')), row=3, col=1)
 
-        fig.update_layout(title_text=f"Performance Analysis: {self.strategy.name}", template='plotly_dark', height=900,
+        fig.update_layout(title_text=f"Performance Analysis: {self.strategy.name} ({self.period.replace('_', ' ').title()})", template='plotly_dark', height=900,
                           legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
         
         report_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        report_basename = f"{self.strategy.name}_{self.asset}_{self.timeframe}_{report_timestamp}"
+        report_basename = f"{self.strategy.name}_{self.asset}_{self.timeframe}_{self.period}_{report_timestamp}"
         html_path = os.path.join(OUTPUT_DIR, f"{report_basename}_individual_report.html")
         
         html_content = f"""
         <html><head><title>Backtest Report: {self.strategy.name}</title>
         <style> body {{ font-family: 'Arial', sans-serif; background-color: #111; color: #eee; }} h1, h2 {{ color: #44aaff; border-bottom: 2px solid #44aaff; }} table {{ border-collapse: collapse; width: 50%; margin: 20px 0; }} th, td {{ border: 1px solid #444; padding: 8px; text-align: left; }} th {{ background-color: #222; }} </style></head>
         <body><h1>Backtest Report: {self.strategy.name}</h1>
-        <h2>Period: {self.start_date.strftime('%Y-%m-%d')} to {self.end_date.strftime('%Y-%m-%d')}</h2>"""
+        <h2>Period: {self.start_date.strftime('%Y-%m-%d')} to {self.end_date.strftime('%Y-%m-%d')} ({self.period.replace('_', ' ').title()})</h2>"""
         for category, data in metrics_data.items():
             html_content += f"<h3>{category}</h3><table>"
             for key, value in data.items(): html_content += f"<tr><th>{key}</th><td>{value}</td></tr>"
@@ -203,7 +263,7 @@ class Backtest:
         with open(html_path, 'w') as f: f.write(html_content)
         log.info(f"Individual HTML report saved to {html_path}")
 
-def generate_comparison_report(all_results: list, backtest_config: dict):
+def generate_comparison_report(all_results: list, backtest_config: dict, period: str):
     if not all_results:
         log.error("No backtest results to generate a comparison report.")
         return
@@ -230,15 +290,17 @@ def generate_comparison_report(all_results: list, backtest_config: dict):
     fig_bars.update_layout(title_text='Key Metric Comparison', template='plotly_dark', showlegend=False)
 
     execution_time = datetime.now()
+    start_date_str = backtest_config['periods'][period]['start_date'].split('T')[0]
+    end_date_str = backtest_config['periods'][period]['end_date'].split('T')[0]
     report_timestamp = execution_time.strftime('%Y%m%d_%H%M%S')
-    html_path = os.path.join(OUTPUT_DIR, f"comparison_report_{report_timestamp}.html")
+    html_path = os.path.join(OUTPUT_DIR, f"comparison_report_{period}_{report_timestamp}.html")
 
     html_content = f"""
-    <html><head><title>Strategy Comparison Report</title>
+    <html><head><title>Strategy Comparison Report ({period.replace('_', ' ').title()})</title>
     <style> body {{ font-family: 'Arial', sans-serif; background-color: #111; color: #eee; }} h1, h2 {{ color: #44aaff; border-bottom: 2px solid #44aaff; }} table {{ border-collapse: collapse; width: 80%; margin: 20px auto; }} th, td {{ border: 1px solid #444; padding: 10px; text-align: left; }} th {{ background-color: #222; }} </style></head>
-    <body><h1>Strategy Comparison Report</h1>
+    <body><h1>Strategy Comparison Report ({period.replace('_', ' ').title()})</h1>
     <h2>Executed on: {execution_time.strftime('%Y-%m-%d %H:%M:%S')}</h2>
-    <h2>Period: {backtest_config['start_date']} to {backtest_config['end_date']}</h2>"""
+    <h2>Period: {start_date_str} to {end_date_str}</h2>"""
     
     fig_table = go.Figure(data=[go.Table(header=dict(values=list(summary_df.columns), fill_color='#222', align='left', font=dict(color='white')),
                                         cells=dict(values=[summary_df[col] for col in summary_df.columns], fill_color='#111', align='left', font=dict(color='white')))])
@@ -270,8 +332,17 @@ def load_strategies_from_config(config_path: str) -> tuple:
     return initialized_strategies, config.get('system', {}), config.get('backtest', {})
 
 if __name__ == "__main__":
-    log.info("--- Starting Backtesting Engine ---")
-    
+    parser = argparse.ArgumentParser(description="Backtesting Engine for the Trading System.")
+    parser.add_argument(
+        '--period',
+        type=str,
+        default='in_sample',
+        choices=['in_sample', 'out_of_sample'],
+        help="The backtesting period to use, as defined in config.yaml. Defaults to 'in_sample'."
+    )
+    args = parser.parse_args()
+
+    log.info(f"--- Starting Backtesting Engine for '{args.period.replace('_', ' ').title()}' period ---")
     strategies, system_config, backtest_config = load_strategies_from_config(CONFIG_PATH)
     
     if not strategies or not system_config or not backtest_config:
@@ -281,7 +352,7 @@ if __name__ == "__main__":
     all_results = []
     for strategy_instance, strategy_config in strategies:
         try:
-            backtest_runner = Backtest(strategy_instance, strategy_config, system_config, backtest_config)
+            backtest_runner = Backtest(strategy_instance, strategy_config, system_config, backtest_config, args.period)
             result = backtest_runner.run()
             if result:
                 all_results.append(result)
@@ -289,7 +360,7 @@ if __name__ == "__main__":
             log.error(f"An error occurred during the backtest for '{strategy_instance.name}': {e}", exc_info=True)
 
     if all_results:
-        generate_comparison_report(all_results, backtest_config)
+        generate_comparison_report(all_results, backtest_config, args.period)
     else:
         log.warning("No successful backtests were completed. Comparison report will not be generated.")
 

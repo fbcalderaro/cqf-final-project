@@ -7,7 +7,7 @@ import json
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from trading_system.engine.portfolio_manager import PortfolioManager
+from trading_system.engine.strategy_portfolio import StrategyPortfolio
 from trading_system.strategies.base_strategy import Strategy
 from trading_system.utils.common import log
 
@@ -17,15 +17,22 @@ OUTPUT_DIR = os.path.join(PROJECT_ROOT, 'output', 'live_monitoring')
 
 class StrategyMonitor:
     """
-    Generates a real-time HTML report for a running strategy.
+    Generates real-time monitoring outputs for a single running strategy.
+
+    For each strategy, this class creates two files that are continuously updated:
+    1. An HTML report with charts and metrics for human analysis.
+    2. A JSON summary file with key metrics for machine consumption (e.g., by a dashboard).
     """
 
-    def __init__(self, strategy: Strategy, portfolio_manager: PortfolioManager, asset: str, timeframe: str):
+    def __init__(self, strategy: Strategy, strategy_portfolio: StrategyPortfolio, asset: str, timeframe: str):
         """
         Initializes the StrategyMonitor.
+
+        Args:
+            strategy_portfolio (StrategyPortfolio): The specific sub-portfolio for this strategy.
         """
         self.strategy = strategy
-        self.pm = portfolio_manager
+        self.sp = strategy_portfolio # Changed from pm to sp (StrategyPortfolio)
         self.asset = asset
         self.timeframe = timeframe
         self.start_time = datetime.now(timezone.utc)
@@ -38,18 +45,18 @@ class StrategyMonitor:
 
     def generate_report(self, strategy_state: str, latest_signal: int, current_price: float, price_data: pd.DataFrame):
         """
-        Generates and overwrites an HTML file with the latest strategy status and charts.
+        Generates and overwrites the HTML and JSON files with the latest strategy status.
         """
         # --- Calculate current portfolio values ---
         base_asset = self.asset.split('-')[0]
-        position_qty = self.pm.positions.get(self.asset, 0.0)
+        position_qty = self.sp.positions.get(self.asset, 0.0)
         
-        self.pm.update_market_value(self.asset, current_price)
-        total_equity = self.pm.get_total_equity()
+        self.sp.update_market_value(current_price)
+        total_equity = self.sp.get_current_equity()
         position_value = position_qty * current_price
 
         # --- Calculate performance metrics ---
-        initial_equity = self.pm.initial_cash
+        initial_equity = self.sp.initial_equity
         pnl = total_equity - initial_equity
         pnl_pct = (pnl / initial_equity) * 100 if initial_equity > 0 else 0.0
 
@@ -62,7 +69,7 @@ class StrategyMonitor:
             position_qty, position_value, total_equity, pnl, pnl_pct, fig
         )
 
-        # --- NEW: Save a JSON summary for the dashboard ---
+        # Save a JSON summary for the main dashboard to consume.
         self._save_json_summary(
             strategy_state, latest_signal, current_price,
             position_qty, total_equity, pnl, pnl_pct
@@ -86,7 +93,9 @@ class StrategyMonitor:
         )
 
         # --- Plot 1: Equity Curve ---
-        equity_df = self.pm.equity_curve_df
+        equity_df = pd.DataFrame(self.sp.equity_curve, columns=['Timestamp', 'Equity'])
+        equity_df['Timestamp'] = pd.to_datetime(equity_df['Timestamp'])
+        equity_df.set_index('Timestamp', inplace=True)
         if not equity_df.empty:
             fig.add_trace(go.Scatter(
                 x=equity_df.index, y=equity_df['Equity'],
@@ -94,7 +103,6 @@ class StrategyMonitor:
             ), row=1, col=1)
 
         # --- Plot 2: Price and Trades ---
-        # Use Candlestick for a more detailed price view
         if not price_data.empty:
             fig.add_trace(go.Candlestick(
                 x=price_data.index,
@@ -105,7 +113,7 @@ class StrategyMonitor:
                 name='Price'
             ), row=2, col=1)
         
-        trade_log_df = pd.DataFrame(self.pm.trade_log)
+        trade_log_df = pd.DataFrame(self.sp.trade_log)
         if not trade_log_df.empty:
             buy_trades = trade_log_df[trade_log_df['direction'] == 'BUY']
             sell_trades = trade_log_df[trade_log_df['direction'] == 'SELL']
@@ -124,7 +132,9 @@ class StrategyMonitor:
             title_text=f"Live Performance Analysis: {self.strategy.name}",
             template='plotly_dark',
             height=800,
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            yaxis_fixedrange=False,  # Ensure equity curve y-axis is zoomable
+            yaxis2_fixedrange=False  # Ensure price chart y-axis is zoomable
         )
         return fig
 
@@ -135,8 +145,8 @@ class StrategyMonitor:
 
         # Convert equity curve to a JSON-friendly format (list of dicts)
         equity_curve_data = []
-        if not self.pm.equity_curve_df.empty:
-            equity_df = self.pm.equity_curve_df.reset_index()
+        if self.sp.equity_curve:
+            equity_df = pd.DataFrame(self.sp.equity_curve, columns=['Timestamp', 'Equity'])
             equity_df['Timestamp'] = equity_df['Timestamp'].dt.strftime('%Y-%m-%dT%H:%M:%S.%fZ')
             equity_curve_data = equity_df.to_dict(orient='records')
 
@@ -149,7 +159,7 @@ class StrategyMonitor:
             'total_equity': total_equity,
             'pnl': pnl,
             'pnl_pct': pnl_pct,
-            'total_trades': len(self.pm.trade_log),
+            'total_trades': len(self.sp.trade_log),
             'report_html_file': os.path.basename(self.report_filepath),
             'equity_curve': equity_curve_data
         }
@@ -173,7 +183,7 @@ class StrategyMonitor:
                 "Current Price": f"${current_price:,.2f}"
             },
             "Portfolio (Allocated)": {
-                "Cash (USDT)": f"${self.pm.cash:,.2f}",
+                "Cash (USDT)": f"${self.sp.cash:,.2f}",
                 f"Position ({base_asset})": f"{position_qty:.8f}",
                 "Position Value": f"${position_value:,.2f}",
                 "Total Equity": f"${total_equity:,.2f}"
@@ -181,17 +191,17 @@ class StrategyMonitor:
             "Performance Since Start": {
                 "Total P&L": f"${pnl:,.2f}",
                 "Total Return": f"{pnl_pct:+.2f}%",
-                "Total Trades": len(self.pm.trade_log)
+                "Total Trades": len(self.sp.trade_log)
             }
         }
 
         # --- Build Trade Log Table ---
         trade_log_html_rows = ""
-        if not self.pm.trade_log:
+        if not self.sp.trade_log:
             trade_log_html_rows = '<tr><td colspan="6" style="text-align:center;">No trades executed yet.</td></tr>'
         else:
             # Show most recent trades first, limit to last 50 for performance
-            for trade in reversed(self.pm.trade_log[-50:]):
+            for trade in reversed(self.sp.trade_log[-50:]):
                 ts = trade['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
                 direction_color = 'lime' if trade['direction'] == 'BUY' else 'magenta'
                 trade_log_html_rows += f"""

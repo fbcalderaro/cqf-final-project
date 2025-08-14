@@ -1,4 +1,11 @@
-# trading_system/utils/check_account.py
+"""
+Binance Account Check Utility (check_account.py)
+
+This is a standalone diagnostic script that connects to the Binance Testnet
+using API keys from the environment. It prints a summary of the account,
+including current balances, open orders, and recent trade history for a
+specified symbol.
+"""
 
 import os
 import sys
@@ -14,8 +21,14 @@ from trading_system.utils.common import log
 
 def check_binance_account():
     """
-    Connects to the Binance Testnet and prints a summary of the account,
-    including balances, positions, open orders, and recent trades.
+    Connects to the Binance Testnet and prints a summary of the account.
+
+    The process is as follows:
+    1. Load API keys from environment variables.
+    2. Connect to the Binance Testnet and verify the connection.
+    3. Fetch and display all non-zero asset balances.
+    4. Fetch and display any open orders.
+    5. Fetch and display the 5 most recent trades for BTCUSDT.
     """
     log.info("--- Binance Account Status Check ---")
 
@@ -35,7 +48,7 @@ def check_binance_account():
         client.ping()
         log.info("✅ Successfully connected to Binance Testnet.")
 
-        # 3. Fetch and Display Account Balances
+        # 3. Fetch and display all asset balances that are not zero.
         log.info("\n--- Account Balances ---")
         account_info = client.get_account()
         
@@ -51,7 +64,7 @@ def check_binance_account():
         else:
             print(positions.to_string(index=False))
 
-        # 4. Fetch and Display Open Orders
+        # 4. Fetch and display all currently open orders.
         log.info("\n--- Open Orders ---")
         open_orders = client.get_open_orders()
         if not open_orders:
@@ -60,7 +73,7 @@ def check_binance_account():
             orders_df = pd.DataFrame(open_orders)
             print(orders_df[['symbol', 'side', 'type', 'origQty', 'price', 'status']].to_string(index=False))
 
-        # 5. Fetch and Display Recent Trades for a major pair
+        # 5. Fetch and display recent trades for a major pair (e.g., BTCUSDT) for a quick check.
         log.info("\n--- Recent Trades (BTCUSDT) ---")
         trades = client.get_my_trades(symbol='BTCUSDT', limit=5)
         if not trades:

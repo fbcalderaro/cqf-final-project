@@ -29,10 +29,11 @@ DASHBOARD_FILE = os.path.join(OUTPUT_DIR, 'dashboard.html')
 
 def find_and_read_summaries():
     """Scans the monitoring directory for JSON files and loads them."""
-    summaries = []
+    strategy_summaries = []
+    master_summary = None
     if not os.path.exists(MONITOR_DIR):
         log.warning(f"Monitoring directory not found, cannot generate dashboard: {MONITOR_DIR}")
-        return summaries
+        return strategy_summaries, master_summary
 
     json_files = [f for f in os.listdir(MONITOR_DIR) if f.endswith('.json')]
     log.info(f"Found {len(json_files)} JSON summary files in {MONITOR_DIR}.")
@@ -41,47 +42,69 @@ def find_and_read_summaries():
         filepath = os.path.join(MONITOR_DIR, filename)
         try:
             with open(filepath, 'r', encoding='utf-8') as f:
-                summaries.append(json.load(f))
+                summary_data = json.load(f)
+                # --- Differentiate between master and strategy summaries ---
+                if filename == 'master_summary.json':
+                    master_summary = summary_data
+                else:
+                    strategy_summaries.append(summary_data)
         except Exception as e:
             log.error(f"Error reading summary file {filename}: {e}")
 
-    return summaries
+    return strategy_summaries, master_summary
 
-def generate_dashboard_html(summaries: list) -> str:
+def generate_dashboard_html(strategy_summaries: list, master_summary: dict) -> str:
     """Builds the complete HTML content for the dashboard."""
-    if not summaries:
+    if not strategy_summaries and not master_summary:
         return "<html><body><h1>Live Dashboard</h1><p>No running strategies found or no data available yet.</p></body></html>"
 
-    # --- 1. Build Summary Table ---
-    summary_df = pd.DataFrame(summaries)
-    summary_df['pnl_pct'] = summary_df['pnl_pct'].apply(lambda x: f"{x:+.2f}%")
-    summary_df['total_equity'] = summary_df['total_equity'].apply(lambda x: f"${x:,.2f}")
-    summary_df['last_update'] = pd.to_datetime(summary_df['last_update']).dt.strftime('%Y-%m-%d %H:%M:%S')
-    summary_df['report_html_file'] = summary_df['report_html_file'].apply(
-        lambda x: f'<a href="live_monitoring/{x}" target="_blank">View Report</a>'
-    )
-    
-    summary_df = summary_df.rename(columns={
-        'strategy_name': 'Strategy', 'asset': 'Asset', 'timeframe': 'TF',
-        'strategy_state': 'State', 'total_equity': 'Equity', 'pnl_pct': 'Return %',
-        'total_trades': 'Trades', 'last_update': 'Last Update (UTC)', 'report_html_file': 'Link'
-    })
-    
-    table_html = summary_df[['Strategy', 'Asset', 'TF', 'State', 'Equity', 'Return %', 'Trades', 'Last Update (UTC)', 'Link']].to_html(escape=False, index=False, classes='styled-table')
+    master_chart_html = ""
+    strategy_table_html = "<p>No running strategies found.</p>"
+    strategy_chart_html = ""
 
-    # --- 2. Build Combined Equity Chart ---
-    fig_equity = go.Figure()
-    for summary in summaries:
-        if summary.get('equity_curve'):
-            equity_df = pd.DataFrame(summary['equity_curve'])
-            if not equity_df.empty:
-                fig_equity.add_trace(go.Scatter(
-                    x=pd.to_datetime(equity_df['Timestamp']), y=equity_df['Equity'],
-                    name=summary['strategy_name'], mode='lines'
-                ))
-    
-    fig_equity.update_layout(title_text='Combined Strategy Equity', template='plotly_dark', height=500)
-    chart_html = fig_equity.to_html(full_html=False, include_plotlyjs='cdn')
+    # --- 1. Build Master Account Chart (if available) ---
+    if master_summary and master_summary.get('equity_curve'):
+        fig_master_equity = go.Figure()
+        equity_df = pd.DataFrame(master_summary['equity_curve'])
+        if not equity_df.empty:
+            fig_master_equity.add_trace(go.Scatter(
+                x=pd.to_datetime(equity_df['Timestamp']), y=equity_df['Equity'],
+                name='Master Account Equity', mode='lines', line=dict(color='gold', width=3)
+            ))
+        fig_master_equity.update_layout(title_text='Master Account Equity Curve', template='plotly_dark', height=500)
+        master_chart_html = fig_master_equity.to_html(full_html=False, include_plotlyjs='cdn')
+
+    # --- 1. Build Summary Table ---
+    if strategy_summaries:
+        summary_df = pd.DataFrame(strategy_summaries)
+        summary_df['pnl_pct'] = summary_df['pnl_pct'].apply(lambda x: f"{x:+.2f}%")
+        summary_df['total_equity'] = summary_df['total_equity'].apply(lambda x: f"${x:,.2f}")
+        summary_df['last_update'] = pd.to_datetime(summary_df['last_update']).dt.strftime('%Y-%m-%d %H:%M:%S')
+        summary_df['report_html_file'] = summary_df['report_html_file'].apply(
+            lambda x: f'<a href="live_monitoring/{x}" target="_blank">View Report</a>'
+        )
+        
+        summary_df = summary_df.rename(columns={
+            'strategy_name': 'Strategy', 'asset': 'Asset', 'timeframe': 'TF',
+            'strategy_state': 'State', 'total_equity': 'Equity', 'pnl_pct': 'Return %',
+            'total_trades': 'Trades', 'last_update': 'Last Update (UTC)', 'report_html_file': 'Link'
+        })
+        
+        strategy_table_html = summary_df[['Strategy', 'Asset', 'TF', 'State', 'Equity', 'Return %', 'Trades', 'Last Update (UTC)', 'Link']].to_html(escape=False, index=False, classes='styled-table')
+
+        # --- 2. Build Combined Strategy Equity Chart ---
+        fig_equity = go.Figure()
+        for summary in strategy_summaries:
+            if summary.get('equity_curve'):
+                equity_df = pd.DataFrame(summary['equity_curve'])
+                if not equity_df.empty:
+                    fig_equity.add_trace(go.Scatter(
+                        x=pd.to_datetime(equity_df['Timestamp']), y=equity_df['Equity'],
+                        name=summary['strategy_name'], mode='lines'
+                    ))
+        
+        fig_equity.update_layout(title_text='Individual Strategy Equity Comparison', template='plotly_dark', height=500)
+        strategy_chart_html = fig_equity.to_html(full_html=False, include_plotlyjs='cdn' if not master_chart_html else False)
 
     # --- 3. Assemble Final HTML ---
     html_content = f"""
@@ -89,6 +112,7 @@ def generate_dashboard_html(summaries: list) -> str:
     <style>
         body {{ font-family: 'Verdana', sans-serif; background-color: #111; color: #eee; margin: 0; padding: 20px; }}
         h1, h2 {{ color: #00aaff; border-bottom: 2px solid #00aaff; padding-bottom: 5px; }}
+        .chart-container {{ margin-top: 20px; }}
         .styled-table {{ border-collapse: collapse; width: 100%; margin: 20px 0; font-size: 0.9em; }}
         .styled-table thead tr {{ background-color: #00aaff; color: #ffffff; text-align: left; }}
         .styled-table th, .styled-table td {{ padding: 12px 15px; }}
@@ -99,8 +123,10 @@ def generate_dashboard_html(summaries: list) -> str:
     </style></head>
     <body>
         <h1>Live Strategies Dashboard</h1><p>Last generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
-        <h2>Performance Summary</h2>{table_html}
-        <h2>Equity Curves</h2>{chart_html}
+        <div class="chart-container"><h2>Master Account Performance</h2>{master_chart_html}</div>
+        <h2>Individual Strategy Performance</h2>
+        {strategy_table_html}
+        <div class="chart-container">{strategy_chart_html}</div>
     </body></html>
     """
     return html_content
@@ -108,11 +134,11 @@ def generate_dashboard_html(summaries: list) -> str:
 def main():
     """Main function to generate the dashboard."""
     log.info("--- Generating Live Dashboard ---")
-    # --- FIX: Ensure the output directory exists before trying to write to it ---
+    # Ensure the output directory exists before trying to write to it ---
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    summaries = find_and_read_summaries()
-    html_content = generate_dashboard_html(summaries)
+    strategy_summaries, master_summary = find_and_read_summaries()
+    html_content = generate_dashboard_html(strategy_summaries, master_summary)
     with open(DASHBOARD_FILE, 'w', encoding='utf-8') as f:
         f.write(html_content)
     log.info(f"✅ Dashboard successfully generated at: {DASHBOARD_FILE}")

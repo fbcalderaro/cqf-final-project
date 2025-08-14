@@ -17,11 +17,20 @@ CONFIG_PATH = os.path.join(PROJECT_ROOT, 'trading_system', 'config', 'config.yam
 
 def generate_gap_chart(asset, start_dt, end_dt, config):
     """
-    Generates a candlestick chart that visually highlights gaps in the data.
+    Fetches 1-minute candle data and generates an HTML candlestick chart.
+
+    The key technique used here is resampling the data to a fixed 1-minute
+    frequency. Any missing timestamps in the original data will become `NaN`
+    rows, which Plotly renders as a visible break or "gap" in the chart.
+
+    Args:
+        asset (str): The asset to chart (e.g., 'BTC-USDT').
+        start_dt (datetime): The start of the date range.
+        end_dt (datetime): The end of the date range.
+        config (dict): The application's configuration dictionary.
     """
     log.info(f"Generating gap chart for {asset} from {start_dt.date()} to {end_dt.date()}")
 
-    # Step 1: Fetch data using the new function in db_utils
     df = db_utils.fetch_candles_for_range(config['system']['database'], asset, start_dt, end_dt)
 
     if df is None or df.empty:
@@ -35,10 +44,9 @@ def generate_gap_chart(asset, start_dt, end_dt, config):
     log.info(f"Resampled data to 1-minute frequency to identify gaps.")
     # Plotly automatically creates breaks in the chart where it finds NaN values.
 
-    # Step 2: Create the figure
     fig = go.Figure()
 
-    # Add the candlestick trace
+    # Add the candlestick trace using the resampled data.
     fig.add_trace(go.Candlestick(
         x=df_resampled.index, 
         open=df_resampled['open_price'], 
@@ -48,7 +56,7 @@ def generate_gap_chart(asset, start_dt, end_dt, config):
         name=asset
     ))
 
-    # --- Layout Customization ---
+    # Customize the chart layout for better readability.
     fig.update_layout(
         title_text=f"{asset} 1-Minute Candlestick Chart (Gaps are visible as breaks)",
         xaxis_title="Date",
@@ -58,7 +66,7 @@ def generate_gap_chart(asset, start_dt, end_dt, config):
         height=800
     )
 
-    # --- Save to File ---
+    # Save the generated chart as an HTML file in the 'output' directory.
     output_dir = os.path.join(PROJECT_ROOT, 'output')
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -71,6 +79,9 @@ def generate_gap_chart(asset, start_dt, end_dt, config):
 
 
 if __name__ == "__main__":
+    """
+    Main execution block to run the script from the command line.
+    """
     parser = argparse.ArgumentParser(description="Generate candlestick charts to find data gaps.")
     parser.add_argument('--asset', required=True, help="The asset to chart (e.g., BTC-USDT).")
     parser.add_argument('--start', required=True, help="Start date in YYYY-MM-DD format.")

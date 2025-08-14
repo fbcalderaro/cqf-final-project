@@ -1,12 +1,21 @@
 # /trading_system/config/config.yaml
 
 system:
-  initial_cash: 100000.0 # Starting cash for the trading system.
-  commission_pct: 0.001 # Percentage commission charged on each trade.
-  risk_per_trade_pct: 0.01 # Percentage of total equity to risk per trade.
-  reconciliation_interval_seconds: 60  # How often to check for new trades and update positions.
-  trading_mode: "live"  # Options: "live" or "paper"
+  initial_cash: 100000.0                # Starting cash for paper trading.
+  commission_pct: 0.001                 # 0.1% commission per trade.
+  risk_per_trade_pct: 0.01              # Percentage of total equity to risk per trade.
+  reconciliation_interval_seconds: 30   # How often to check broker vs internal state.
+  master_monitor_interval_seconds: 60   # How often to save the master portfolio summary for the dashboard.
+  dashboard_interval_seconds: 60        # How often to regenerate the main dashboard HTML file.
+  trading_mode: "live"                  # Options: "live" or "paper"
 
+  # --- Execution Control Parameters ---
+  paper_slippage_pct: 0.0005            # 0.05% simulated slippage for paper trading.
+  max_spread_pct: 0.15                  # Max allowed bid-ask spread (as %) to place an order.
+  order_verify_retries: 3               # Number of times to re-check an order's status.
+  order_verify_delay_seconds: 2         # Seconds to wait between verification attempts.
+
+  # --- Database Configuration ---
   database:
     host: "db"
     port: 5432
@@ -19,29 +28,35 @@ data_ingestion:
   assets_to_track: # List of assets to track and store data for. The script will create a table for each.
     - "BTC-USDT"
     - "ETH-USDT" # Add more assets as needed
-  historical_start_date: "2020-01-01" # The earliest date to backfill historical data from if the database is empty.
+  historical_start_date: "2022-01-01" # The earliest date to backfill historical data from if the database is empty.
   base_interval: "1m" # The interval to fetch and store. Should be the lowest granularity available.
 
 # --- Backtesting Configuration ---
 backtest:
-  # start_date: '2022-01-01T00:00:00'
-  # end_date: '2024-12-31T23:59:59'
-  start_date: '2025-01-01T00:00:00'
-  end_date: '2025-08-09T23:59:59'
   generate_individual_reports: true
+  periods:
+    in_sample:
+      start_date: '2025-01-01T00:00:00'
+      end_date: '2025-06-30T23:59:59'
+    out_of_sample:
+      start_date: '2025-07-01T00:00:00'
+      end_date: '2025-08-11T23:59:59'
 
 # --- Trading Strategies Configuration ---
 strategies:
 
-  # --- Test Strategy ---
+  # ===================================================================
+  #  Test Strategies
+  # ===================================================================
   # Use this strategy to verify the live trading engine is working.
   # It will generate a BUY signal, then a SELL signal, every 'signal_interval' bars.
+
   # - name: "Test_Signal_Generator_1"
   #   class: "TestStrategy"
   #   module: "strategies.test_strategy" 
   #   asset: "BTC-USDT"
   #   timeframe: "1m"
-  #   cash_allocation_pct: 10 # Allocate X% of total cash to this strategy
+  #   cash_allocation_pct: 70 # Allocate X% of total cash to this strategy
   #   params:
   #     signal_interval: 1 # Generate a signal every 1 bars of 'timeframe'
 
@@ -50,7 +65,7 @@ strategies:
   #   module: "strategies.test_strategy" 
   #   asset: "ETH-USDT"
   #   timeframe: "1m"
-  #   cash_allocation_pct: 10 # Allocate X% of total cash to this strategy
+  #   cash_allocation_pct: 30 # Allocate X% of total cash to this strategy
   #   params:
   #     signal_interval: 1 # Generate a signal every 1 bars of 'timeframe'
 
@@ -58,12 +73,12 @@ strategies:
   #  Momentum Strategy Variations (for BTC-USDT on 15m)
   # ===================================================================
 
-  # # --- Base Strategy (Your Current Config) ---
+  # # --- Base Strategy ---
   # - name: "Momentum_Base"
   #   class: "MomentumStrategy"
   #   module: "strategies.momentum_strategy"
   #   asset: "BTC-USDT"
-  #   timeframe: "15m"
+  #   timeframe: "1m"
   #   params:
   #     ma_type: "ema"
   #     short_window: 20
@@ -78,7 +93,7 @@ strategies:
   #   class: "MomentumStrategy"
   #   module: "strategies.momentum_strategy"
   #   asset: "BTC-USDT"
-  #   timeframe: "15m"
+  #   timeframe: "1m"
   #   params:
   #     ma_type: "ema"
   #     short_window: 12      # Faster
@@ -93,8 +108,8 @@ strategies:
     class: "MomentumStrategy"
     module: "strategies.momentum_strategy"
     asset: "BTC-USDT"
-    timeframe: "15m"
-    cash_allocation_pct: 40 # Allocate X% of total cash to this strategy
+    timeframe: "1m"
+    cash_allocation_pct: 50 # Allocate X% of total cash to this strategy
     params:
       ma_type: "ema"
       short_window: 50       # Slower
@@ -141,7 +156,7 @@ strategies:
   # # --- Base Strategy (Your Current Config) ---
   # - name: "MeanReversion_Base"
   #   class: "MeanReversionOU"
-  #   module: "strategies.mean_reversion_ou"
+  #   module: "strategies.mean_reversion_strategy"
   #   asset: "ETH-USDT"
   #   timeframe: "15m"
   #   params:
@@ -155,7 +170,7 @@ strategies:
   # # Hypothesis: The base entry is too strict. We can increase trade frequency by entering on smaller deviations.
   # - name: "MeanReversion_AggressiveEntry"
   #   class: "MeanReversionOU"
-  #   module: "strategies.mean_reversion_ou"
+  #   module: "strategies.mean_reversion_strategy"
   #   asset: "ETH-USDT"
   #   timeframe: "15m"
   #   params:
@@ -165,26 +180,26 @@ strategies:
   #     kalman_process_noise: 0.00001
   #     kalman_measurement_noise: 0.0001
 
-  # --- Variation MR2: Quicker Profit Taking ---
-  # Hypothesis: The base strategy holds trades for too long. Exiting sooner will lock in small gains more frequently.
-  - name: "MeanReversion_QuickExit"
-    class: "MeanReversionOU"
-    module: "strategies.mean_reversion_ou"
-    asset: "ETH-USDT"
-    timeframe: "15m"
-    cash_allocation_pct: 40 # Allocate X% of total cash to this strategy
-    params:
-      lookback_window: 90
-      entry_z_score: 2.0
-      exit_z_score: 0.8        # Much wider exit zone for quick exits
-      kalman_process_noise: 0.00001
-      kalman_measurement_noise: 0.0001
+  # # --- Variation MR2: Quicker Profit Taking ---
+  # # Hypothesis: The base strategy holds trades for too long. Exiting sooner will lock in small gains more frequently.
+  # - name: "MeanReversion_QuickExit"
+  #   class: "MeanReversionOU"
+  #   module: "strategies.mean_reversion_strategy"
+  #   asset: "ETH-USDT"
+  #   timeframe: "15m"
+  #   cash_allocation_pct: 40 # Allocate X% of total cash to this strategy
+  #   params:
+  #     lookback_window: 90
+  #     entry_z_score: 2.0
+  #     exit_z_score: 0.8        # Much wider exit zone for quick exits
+  #     kalman_process_noise: 0.00001
+  #     kalman_measurement_noise: 0.0001
 
   # # --- Variation MR3: Faster Adapting Mean ---
   # # Hypothesis: The Kalman filter is too slow. A faster mean will better suit a volatile market.
   # - name: "MeanReversion_FastMean"
   #   class: "MeanReversionOU"
-  #   module: "strategies.mean_reversion_ou"
+  #   module: "strategies.mean_reversion_strategy"
   #   asset: "ETH-USDT"
   #   timeframe: "15m"
   #   params:
@@ -198,7 +213,7 @@ strategies:
   # # Hypothesis: A combination of aggressive settings will create a high-frequency version of the strategy.
   # - name: "MeanReversion_HighFreq"
   #   class: "MeanReversionOU"
-  #   module: "strategies.mean_reversion_ou"
+  #   module: "strategies.mean_reversion_strategy"
   #   asset: "ETH-USDT"
   #   timeframe: "15m"
   #   params:
@@ -207,6 +222,135 @@ strategies:
   #     exit_z_score: 0.7        # Quicker exit
   #     kalman_process_noise: 0.00005 # Faster mean
   #     kalman_measurement_noise: 0.0001
+
+  # ===================================================================
+  #  Advanced Mean Reversion Variations
+  # ===================================================================
+
+  # # --- Variation MR5: Advanced with Filters ---
+  # # Hypothesis: Adding volatility and trend filters will improve profitability by avoiding bad market regimes.
+  # - name: "MeanReversion_Advanced"
+  #   class: "MeanReversionOU"
+  #   module: "strategies.mean_reversion_strategy"
+  #   asset: "ETH-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     lookback_window: 90
+  #     entry_z_score: 2.0
+  #     exit_z_score: 0.3
+  #     stop_loss_z_score: 3.5      # Exit if z-score drops below -3.5
+
+  #     kalman_process_noise: 0.00001
+  #     kalman_measurement_noise: 0.0001
+
+  #     # --- Enable Filters ---
+  #     use_volatility_filter: true # Enable the ATR volatility filter
+  #     atr_period: 14
+  #     atr_multiplier: 1.5         # Only trade if ATR < 1.5 * its moving average
+
+  #     use_trend_filter: true      # Enable the long-term trend filter
+  #     trend_ma_period: 200        # Only take long trades if price > 200-period SMA
+
+  # # --- Variation MR6: More Sensitive Mean ---
+  # # Hypothesis: The Kalman filter is too slow. A more responsive mean will catch reversions faster in a choppy market.
+  # - name: "MeanReversion_SensitiveMean"
+  #   class: "MeanReversionOU"
+  #   module: "strategies.mean_reversion_strategy"
+  #   asset: "ETH-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     lookback_window: 90
+  #     entry_z_score: 2.0
+  #     exit_z_score: 0.3
+  #     stop_loss_z_score: 3.5
+  #     kalman_process_noise: 0.00008 # <-- Increased process noise for faster adaptation
+  #     kalman_measurement_noise: 0.0001
+  #     use_volatility_filter: true
+  #     atr_period: 14
+  #     atr_multiplier: 1.5
+  #     use_trend_filter: true
+  #     trend_ma_period: 200
+
+  # --- Variation MR7: Stricter Entry, Wider Stop ---
+  # Hypothesis: Requiring a stronger deviation to enter (higher Z-score) but allowing more room before stopping out will improve the win rate.
+  - name: "MeanReversion_StrictEntry"
+    class: "MeanReversionOU"
+    module: "strategies.mean_reversion_strategy"
+    asset: "ETH-USDT"
+    timeframe: "1m"
+    cash_allocation_pct: 50
+    params:
+      lookback_window: 90
+      entry_z_score: 2.5        # <-- Stricter entry
+      exit_z_score: 0.3
+      stop_loss_z_score: 4.0      # <-- Wider stop-loss
+      kalman_process_noise: 0.00001
+      kalman_measurement_noise: 0.0001
+      use_volatility_filter: true
+      atr_period: 14
+      atr_multiplier: 1.5
+      use_trend_filter: true
+      trend_ma_period: 200
+
+  # # --- Variation MR8: Looser Volatility Filter ---
+  # # Hypothesis: The volatility filter is too restrictive. Allowing trades in slightly more volatile conditions might capture more opportunities.
+  # - name: "MeanReversion_LooseVolFilter"
+  #   class: "MeanReversionOU"
+  #   module: "strategies.mean_reversion_strategy"
+  #   asset: "ETH-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     lookback_window: 90
+  #     entry_z_score: 2.0
+  #     exit_z_score: 0.3
+  #     stop_loss_z_score: 3.5
+  #     kalman_process_noise: 0.00001
+  #     kalman_measurement_noise: 0.0001
+  #     use_volatility_filter: true
+  #     atr_period: 14
+  #     atr_multiplier: 2.0         # <-- Looser volatility filter
+  #     use_trend_filter: true
+  #     trend_ma_period: 200
+
+  # # --- Variation MR9: Faster Trend Filter ---
+  # # Hypothesis: The 200-period trend filter is too slow for a 15m chart. A faster MA will align better with the strategy's holding period.
+  # - name: "MeanReversion_FastTrendFilter"
+  #   class: "MeanReversionOU"
+  #   module: "strategies.mean_reversion_strategy"
+  #   asset: "ETH-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     lookback_window: 90
+  #     entry_z_score: 2.0
+  #     exit_z_score: 0.3
+  #     stop_loss_z_score: 3.5
+  #     kalman_process_noise: 0.00001
+  #     kalman_measurement_noise: 0.0001
+  #     use_volatility_filter: true
+  #     atr_period: 14
+  #     atr_multiplier: 1.5
+  #     use_trend_filter: true
+  #     trend_ma_period: 100        # <-- Faster trend filter
+
+  # # --- Variation MR10: High-Frequency Filtered ---
+  # # Hypothesis: A shorter lookback period combined with the safety of filters can create a robust, high-frequency strategy.
+  # - name: "MeanReversion_HighFreqFiltered"
+  #   class: "MeanReversionOU"
+  #   module: "strategies.mean_reversion_strategy"
+  #   asset: "ETH-USDT"
+  #   timeframe: "15m"
+  #   params:
+  #     lookback_window: 45         # <-- Shorter lookback
+  #     entry_z_score: 1.8          # Adjusted for shorter lookback
+  #     exit_z_score: 0.5           # Adjusted for shorter lookback
+  #     stop_loss_z_score: 3.0      # Adjusted for shorter lookback
+  #     kalman_process_noise: 0.00001
+  #     kalman_measurement_noise: 0.0001
+  #     use_volatility_filter: true
+  #     atr_period: 14
+  #     atr_multiplier: 1.5
+  #     use_trend_filter: true
+  #     trend_ma_period: 200
 
   # # --- Momentum Strategy ---
   
@@ -284,7 +428,7 @@ strategies:
   # --- Ornstein-Uhlenbeck with Kalman Filter Strategy ---
   # - name: "MeanReversionOU_ETH_15m"
   #   class: "MeanReversionOU"
-  #   module: "strategies.mean_reversion_ou"
+  #   module: "strategies.mean_reversion_strategy"
   #   asset: "ETH-USDT"
   #   timeframe : "15m"
   #   params:

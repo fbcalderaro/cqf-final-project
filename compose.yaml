@@ -15,11 +15,12 @@ services:
       - ./db-backup:/db-backups
       - ./init-db.sh:/docker-entrypoint-initdb.d/init-db.sh
 
-  app:
+  trader:
     build:
       context: .
-      dockerfile: app.Dockerfile
+      dockerfile: trader.Dockerfile
     restart: always
+    command: python trading_system/trader.py
     environment:
       # --- For Database Connection ---
       - DB_USER=fbcalderaro
@@ -29,6 +30,45 @@ services:
       - DB_NAME=crypto_trading
     volumes:
       # Mount the entire project directory into the container's /app folder
+      - .:/app
+    depends_on:
+      - db
+    env_file:
+      - .env
+
+  ingestor:
+    build:
+      context: .
+      dockerfile: ingestor.Dockerfile
+    restart: always
+    command: python trading_system/data_ingestion.py --mode sync
+    environment:
+      # --- For Database Connection ---
+      - DB_USER=fbcalderaro
+      - DB_PASSWORD=123tusca
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=crypto_trading
+    volumes:
+      - .:/app
+    depends_on:
+      - db
+    env_file:
+      - .env
+
+  backtester:
+    build:
+      context: .
+      dockerfile: backtester.Dockerfile
+    # This service does not restart, as it's for one-off tasks.
+    command: python /app/trading_system/backtest.py --period in_sample # Replace with your actual backtester script
+    environment:
+      - DB_USER=fbcalderaro
+      - DB_PASSWORD=123tusca
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=crypto_trading
+    volumes:
       - .:/app
     depends_on:
       - db

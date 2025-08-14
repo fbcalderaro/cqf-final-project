@@ -1,6 +1,12 @@
 # docker
 docker-compose down
 docker compose up -d --build
+docker compose logs -f
+docker compose logs -f trader
+docker compose logs -f ingestor
+docker compose logs -f --tail=50 trader
+docker compose up -d --force-recreate trader
+docker compose run --rm backtester
 
 # database
 docker exec cqf-final-project-db-1 pg_dump -U fbcalderaro -d crypto_trading -F c > ./db-backup/latest.dump
@@ -16,27 +22,27 @@ git add .
 git commit -m "Comment"
 git push origin main
 
-# scripts
+# bash
 docker exec -it cqf-final-project-app-1 bash
 
-docker exec -it cqf-final-project-app-1 python /app/python-scripts/binance_get_data.py
-docker exec -it cqf-final-project-app-1 python /app/python-scripts/backfill_indicators.py --start 2025-01-01 --end 2025-01-01
-docker exec -it cqf-final-project-app-1 python /app/python-scripts/backtest.py
-docker exec -it cqf-final-project-app-1 python /app/python-scripts/charts.py --start 2024-01-01 --end 2024-01-01
-docker exec -it cqf-final-project-app-1 python /app/python-scripts/broker.py
-
+# data ingestion
 docker exec -it cqf-final-project-app-1 python /app/trading_system/data_ingestion.py
 docker exec -it cqf-final-project-app-1 python /app/trading_system/data_ingestion.py --mode=backfill
 docker exec -it cqf-final-project-app-1 python /app/trading_system/data_integrity.py
 
+# backtesting
 docker exec -it cqf-final-project-app-1 python /app/trading_system/backtest.py
+docker exec -it cqf-final-project-app-1 python /app/trading_system/backtest.py --period in_sample
+docker exec -it cqf-final-project-app-1 python /app/trading_system/backtest.py --period out_of_sample
+
+# trading
+docker exec -it cqf-final-project-app-1 python /app/trading_system/trader.py
+
+# dashboard
+# The dashboard is now generated automatically by the trader.py engine.
+# You can still run this command for a one-off manual generation.
 docker exec -it cqf-final-project-app-1 python /app/trading_system/dashboard_generator.py
 
-docker exec -it cqf-final-project-app-1 bash -c "while true; do python /app/trading_system/dashboard_generator.py; sleep 60; done"
-
-docker exec -it cqf-final-project-app-1 python /app/trading_system/trader.py Test_Signal_Generator_1
-docker exec -it cqf-final-project-app-1 python /app/trading_system/trader.py Momentum_Slower
-docker exec -it cqf-final-project-app-1 python /app/trading_system/trader.py MeanReversion_QuickExit
-
+# utils
 docker exec -it cqf-final-project-app-1 python /app/trading_system/utils/charts.py --asset BTC-USDT --start 2020-02-19 --end 2020-02-20
 docker exec -it cqf-final-project-app-1 python /app/trading_system/utils/check_account.py
