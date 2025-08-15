@@ -57,6 +57,10 @@ class MomentumStrategy(Strategy):
         if not isinstance(data, pd.DataFrame) or not all(col in data.columns for col in ['High', 'Low', 'Close']):
             raise ValueError("Input data must be a pandas DataFrame with High, Low, and Close columns.")
         
+        if data.empty:
+            data['signal'] = 0
+            return data
+        
         # --- 1. Calculate Core Crossover Indicator ---
         if self.ma_type == 'ema':
             short_ma = ta.ema(data['Close'], length=self.short_window)
@@ -83,6 +87,12 @@ class MomentumStrategy(Strategy):
         # Base crossover conditions: A buy signal is when the short MA crosses ABOVE the long MA.
         # A sell signal is when the short MA crosses BELOW the long MA.
         # We check the previous period (.shift(1)) to pinpoint the exact bar of the crossover.
+        
+        # --- FIX: Add a check to ensure MAs were calculated ---
+        if short_ma is None or long_ma is None:
+            data['signal'] = 0 # Not enough data, so no signal
+            return data
+
         enter_long = (short_ma > long_ma) & (short_ma.shift(1) <= long_ma.shift(1))
         exit_long = (short_ma < long_ma) & (short_ma.shift(1) >= long_ma.shift(1))
         

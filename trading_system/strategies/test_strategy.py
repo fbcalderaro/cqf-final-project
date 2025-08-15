@@ -30,6 +30,10 @@ class TestStrategy(Strategy):
         if not isinstance(data, pd.DataFrame):
             raise ValueError("Input data must be a pandas DataFrame.")
         
+        if data.empty:
+            data['signal'] = 0
+            return data
+        
         # Start with a series of all zeros (no signal).
         signals = pd.Series(0, index=data.index, dtype=int)
         

@@ -1,12 +1,18 @@
 # docker
 docker-compose down
 docker compose up -d --build
+docker compose up -d --build trader
+docker compose up -d --force-recreate trader
+
 docker compose logs -f
 docker compose logs -f trader
 docker compose logs -f ingestor
 docker compose logs -f --tail=50 trader
-docker compose up -d --force-recreate trader
+
 docker compose run --rm backtester
+docker compose run --rm backtester --period in_sample
+docker compose run --rm backtester --period out_of_sample
+
 
 # database
 docker exec cqf-final-project-db-1 pg_dump -U fbcalderaro -d crypto_trading -F c > ./db-backup/latest.dump

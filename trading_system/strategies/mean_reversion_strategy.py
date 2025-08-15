@@ -75,6 +75,10 @@ class MeanReversionOU(Strategy):
         if not all(col in data.columns for col in ['Open', 'High', 'Low', 'Close']):
             raise ValueError("Input DataFrame must contain OHLC columns.")
 
+        if data.empty:
+            data['signal'] = 0
+            return data
+
         # --- 1. Calculate Z-Score ---
         # Work with log prices to stabilize variance.
         log_price = np.log(data['Close'])
@@ -94,9 +98,11 @@ class MeanReversionOU(Strategy):
             # Volatility filter: Avoid trading when the market is excessively volatile.
             # We only trade if the current ATR is less than a multiple of its long-term average.
             atr = ta.atr(data['High'], data['Low'], data['Close'], length=self.atr_period)
-            atr_ma = atr.rolling(window=self.lookback_window, min_periods=20).mean()
-            volatility_filter = atr < (atr_ma * self.atr_multiplier)
-            data['atr_ma_threshold'] = atr_ma * self.atr_multiplier # Add to df for analysis
+            # --- FIX: Add a check to ensure ATR was calculated ---
+            if atr is not None:
+                atr_ma = atr.rolling(window=self.lookback_window, min_periods=20).mean()
+                volatility_filter = atr < (atr_ma * self.atr_multiplier)
+                data['atr_ma_threshold'] = atr_ma * self.atr_multiplier # Add to df for analysis
 
         if self.use_trend_filter:
             # Trend filter: Only take long mean-reversion trades if the asset is in a long-term uptrend.

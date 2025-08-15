@@ -142,14 +142,24 @@ async def strategy_runner(strategy, config, execution_handler, portfolio_manager
     strategy_name = strategy.name
     asset = config['asset']
     timeframe = config.get('timeframe', '1h')
-    
-    historical_data = preload_historical_data(asset, timeframe, db_config)
+
+    # This now returns raw 1-minute data
+    historical_1m_data = preload_historical_data(asset, timeframe, db_config)
+
+    # Determine the last processed timestamp for the STRATEGY'S timeframe
+    last_processed_ts = None
+    if not historical_1m_data.empty:
+        resample_freq = timeframe.replace('m', 'min').replace('h', 'H')
+        # Resample once just to get the last timestamp
+        resampler = historical_1m_data.resample(resample_freq)
+        if resampler.groups:
+            last_processed_ts = resampler.last().index[-1]
     
     # This dictionary holds the dynamic state for this specific strategy instance.
     strategy_state = {
         'state': TradingState.SEARCHING,
-        'data': historical_data,
-        'last_processed_timestamp': historical_data.index[-1] if not historical_data.empty else None,
+        'data': historical_1m_data, # This is now raw 1m data
+        'last_processed_timestamp': last_processed_ts, # Correctly initialized
         'last_ws_message_time': time.time(),
         'config': config,
         'reconnect_attempts': 0
@@ -484,26 +494,24 @@ def load_strategy_instance(config: dict):
 
 def preload_historical_data(asset: str, timeframe: str, db_config: dict):
     """
-    Fetches the initial chunk of historical data needed to warm up the strategy's indicators.
+    Fetches the initial chunk of historical 1-minute data needed to warm up the strategy's indicators.
     """
-    log.info(f"Pre-loading historical data for {asset} on {timeframe} timeframe...")
+    log.info(f"Pre-loading historical 1-minute data for {asset}...")
     try:
         # Fetch the last 30 days of 1-minute data to ensure we have enough to
         # calculate indicators even for long lookback periods (e.g., 200-period MA on a 1h chart).
         end_dt = datetime.utcnow()
         start_dt = end_dt - timedelta(days=30)
         df_1m = db_utils.fetch_candles_for_range(db_config, asset, start_dt, end_dt)
-        
+
         if df_1m is None or df_1m.empty:
             log.warning(f"No historical data found for {asset} in the last 30 days. Starting with an empty DataFrame.")
             return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])
-        
+
+        # Rename columns to the standard format used by the strategies
         df_1m.rename(columns={'open_price': 'Open', 'high_price': 'High', 'low_price': 'Low', 'close_price': 'Close', 'volume': 'Volume'}, inplace=True)
-        resample_freq = timeframe.replace('m', 'min').replace('h', 'H')
-        agg_rules = {'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'}
-        df_resampled = df_1m.resample(resample_freq).agg(agg_rules).dropna()
-        log.info(f"Successfully pre-loaded {len(df_resampled)} bars for {asset}.")
-        return df_resampled
+        log.info(f"Successfully pre-loaded {len(df_1m)} 1-minute bars for {asset}.")
+        return df_1m
     except Exception as e:
         log.error(f"Failed to preload data for {asset}: {e}", exc_info=True)
         return pd.DataFrame(columns=['Open', 'High', 'Low', 'Close', 'Volume'])

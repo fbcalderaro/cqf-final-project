@@ -19,9 +19,9 @@ system:
   database:
     host: "db"
     port: 5432
-    name: "crypto_data"
-    user: "user"
-    password: "password"
+    name: "crypto_trading_db"
+    user: "trading_user"
+    password: "a_secure_password"
 
 # --- Data Ingestion Configuration ---
 data_ingestion:
