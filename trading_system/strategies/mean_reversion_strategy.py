@@ -6,7 +6,7 @@ import pandas_ta as ta
 from trading_system.strategies.base_strategy import Strategy
 from trading_system.utils.common import log
 
-class MeanReversionOU(Strategy):
+class MeanReversion(Strategy):
     """
     Implements a single-asset, LONG-ONLY mean-reversion strategy based on the
     Ornstein-Uhlenbeck (OU) process. It assumes that the price of an asset will

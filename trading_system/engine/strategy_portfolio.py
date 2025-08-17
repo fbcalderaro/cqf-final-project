@@ -49,7 +49,7 @@ class StrategyPortfolio:
             return self.cash
         return risk_amount
 
-    def on_fill(self, timestamp: datetime, quantity: float, fill_price: float, direction: str, trade_value_quote: float):
+    def on_fill(self, timestamp: datetime, quantity: float, fill_price: float, direction: str, trade_value_quote: float, slippage_pct: float):
         """
         Updates the sub-portfolio's state after a trade is filled.
         This method is called by the master PortfolioManager.
@@ -59,7 +59,8 @@ class StrategyPortfolio:
         commission = abs(trade_value_quote - trade_value)
         self.trade_log.append({
             'timestamp': timestamp, 'asset': self.traded_asset, 'direction': direction,
-            'quantity': quantity, 'price': fill_price, 'commission': commission
+            'quantity': quantity, 'price': fill_price, 'commission': commission,
+            'slippage_pct': slippage_pct
         })
 
         # 2. Update market value based on the fill price.

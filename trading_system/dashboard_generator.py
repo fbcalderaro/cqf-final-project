@@ -95,15 +95,22 @@ def generate_dashboard_html(strategy_summaries: list, master_summary: dict) -> s
         # --- 2. Build Combined Strategy Equity Chart ---
         fig_equity = go.Figure()
         for summary in strategy_summaries:
-            if summary.get('equity_curve'):
+            # Ensure the equity curve exists and is not empty
+            if summary.get('equity_curve') and summary['equity_curve']:
                 equity_df = pd.DataFrame(summary['equity_curve'])
-                if not equity_df.empty:
-                    fig_equity.add_trace(go.Scatter(
-                        x=pd.to_datetime(equity_df['Timestamp']), y=equity_df['Equity'],
-                        name=summary['strategy_name'], mode='lines'
-                    ))
+                # Get initial equity for normalization. Fallback to first value if not present.
+                initial_equity = summary.get('initial_equity', equity_df['Equity'].iloc[0])
+                if initial_equity == 0: initial_equity = 1 # Avoid division by zero
+
+                # Calculate returns in percentage
+                equity_df['Return'] = (equity_df['Equity'] / initial_equity - 1) * 100
+
+                fig_equity.add_trace(go.Scatter(
+                    x=pd.to_datetime(equity_df['Timestamp']), y=equity_df['Return'],
+                    name=summary['strategy_name'], mode='lines'
+                ))
         
-        fig_equity.update_layout(title_text='Individual Strategy Equity Comparison', template='plotly_dark', height=500)
+        fig_equity.update_layout(title_text='Individual Strategy Performance (Normalized Returns)', template='plotly_dark', height=500, yaxis_title="Return", yaxis_ticksuffix="%")
         strategy_chart_html = fig_equity.to_html(full_html=False, include_plotlyjs='cdn' if not master_chart_html else False)
 
     # --- 3. Assemble Final HTML ---

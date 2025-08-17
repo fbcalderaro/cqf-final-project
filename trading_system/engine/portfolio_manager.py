@@ -2,6 +2,7 @@
 
 import pandas as pd
 from datetime import datetime, timezone
+import threading
 from trading_system.utils.common import log
 from trading_system.engine.strategy_portfolio import StrategyPortfolio
 
@@ -33,10 +34,12 @@ class PortfolioManager:
         self.market_values = {}
         self.equity_curve = [(datetime.now(timezone.utc), initial_cash)]
         self.trade_log = []
+        self.lock = threading.Lock()
         self.total_commissions = 0.0
 
         # --- Management of sub-portfolios ---
         self.strategy_portfolios = {}
+        self.strategy_configs = {}
 
         # --- Config values ---
         self.trading_mode = system_config.get('trading_mode', 'paper')
@@ -71,6 +74,7 @@ class PortfolioManager:
             log.warning(f"Strategy '{strategy_name}' is already registered.")
             return
         
+        self.strategy_configs[strategy_name] = config
         # Use strategy-specific risk if defined, otherwise fall back to system default
         risk_pct = config.get('params', {}).get('risk_per_trade_pct', self.system_config.get('risk_per_trade_pct', 0.01))
 
@@ -112,7 +116,7 @@ class PortfolioManager:
                 if sp.traded_asset == asset:
                     sp.update_market_value(price)
 
-    def on_fill(self, strategy_name: str, timestamp: datetime, asset: str, quantity: float, fill_price: float, direction: str, trade_value_quote: float):
+    def on_fill(self, strategy_name: str, timestamp: datetime, asset: str, quantity: float, fill_price: float, direction: str, trade_value_quote: float, slippage_pct: float):
         """
         Processes a trade fill event from the execution handler.
 
@@ -121,45 +125,46 @@ class PortfolioManager:
         2. Delegate the fill to the responsible strategy's sub-portfolio.
         3. Update market values and the master equity curve.
         """
-        # --- 1. Update the Master Portfolio ---
-        trade_value = quantity * fill_price
-        commission = abs(trade_value_quote - trade_value)
-        self.total_commissions += commission
+        with self.lock:
+            # --- 1. Update the Master Portfolio ---
+            trade_value = quantity * fill_price
+            commission = abs(trade_value_quote - trade_value)
+            self.total_commissions += commission
 
-        if direction.upper() == 'BUY':
-            self.cash -= trade_value_quote
-            self.positions[asset] = self.positions.get(asset, 0) + quantity
-            log_cost_label = "Total Cost"
-        elif direction.upper() == 'SELL':
-            self.cash += trade_value_quote
-            self.positions[asset] = self.positions.get(asset, 0) - quantity
-            if self.positions[asset] <= 1e-9:
-                del self.positions[asset]
-            log_cost_label = "Total Proceeds"
-        
-        log.info(f"  [Master Portfolio] FILLED {direction.upper()}: {quantity:.6f} {asset} @ ${fill_price:,.2f} by '{strategy_name}'.")
-        log.info(f"    -> {log_cost_label}: ${trade_value_quote:,.2f}, Implied Comm: ${commission:,.2f}")
-        log.info(f"    -> New Master Cash: ${self.cash:,.2f}")
-        
-        # --- Log only the positions of managed assets for clarity ---
-        if self.relevant_assets:
-            managed_positions = {a: q for a, q in self.positions.items() if a in self.relevant_assets}
-            log.info(f"    -> New Master Positions (Managed): {managed_positions if managed_positions else 'None'}")
-        else:
-            log.info(f"    -> New Master Positions: {self.positions}")
+            if direction.upper() == 'BUY':
+                self.cash -= trade_value_quote
+                self.positions[asset] = self.positions.get(asset, 0) + quantity
+                log_cost_label = "Total Cost"
+            elif direction.upper() == 'SELL':
+                self.cash += trade_value_quote
+                self.positions[asset] = self.positions.get(asset, 0) - quantity
+                if self.positions[asset] <= 1e-9:
+                    del self.positions[asset]
+                log_cost_label = "Total Proceeds"
+            
+            log.info(f"  [Master Portfolio] FILLED {direction.upper()}: {quantity:.6f} {asset} @ ${fill_price:,.2f} by '{strategy_name}'.")
+            log.info(f"    -> {log_cost_label}: ${trade_value_quote:,.2f}, Implied Comm: ${commission:,.2f}")
+            log.info(f"    -> New Master Cash: ${self.cash:,.2f}")
+            
+            # --- Log only the positions of managed assets for clarity ---
+            if self.relevant_assets:
+                managed_positions = {a: q for a, q in self.positions.items() if a in self.relevant_assets}
+                log.info(f"    -> New Master Positions (Managed): {managed_positions if managed_positions else 'None'}")
+            else:
+                log.info(f"    -> New Master Positions: {self.positions}")
 
-        # --- 2. Delegate the fill to the correct Strategy Sub-Portfolio ---
-        strategy_portfolio = self.get_strategy_portfolio(strategy_name)
-        if strategy_portfolio:
-            strategy_portfolio.on_fill(timestamp, quantity, fill_price, direction, trade_value_quote)
-        else:
-            log.warning(f"Could not find sub-portfolio for strategy '{strategy_name}' to log fill.")
+            # --- 2. Delegate the fill to the correct Strategy Sub-Portfolio ---
+            strategy_portfolio = self.get_strategy_portfolio(strategy_name)
+            if strategy_portfolio:
+                strategy_portfolio.on_fill(timestamp, quantity, fill_price, direction, trade_value_quote, slippage_pct)
+            else:
+                log.warning(f"Could not find sub-portfolio for strategy '{strategy_name}' to log fill.")
 
-        # --- 3. Update master equity curve post-trade ---
-        self.update_market_values({asset: fill_price})
-        total_equity = self.get_total_equity()
-        self.equity_curve.append((timestamp, total_equity))
-        log.info(f"    -> New Master Equity: ${total_equity:,.2f}")
+            # --- 3. Update master equity curve post-trade ---
+            self.update_market_values({asset: fill_price})
+            total_equity = self.get_total_equity()
+            self.equity_curve.append((timestamp, total_equity))
+            log.info(f"    -> New Master Equity: ${total_equity:,.2f}")
 
     def reconcile(self, actual_cash: float, actual_positions: dict):
         """
@@ -169,28 +174,72 @@ class PortfolioManager:
         the broker's reality (e.g., due to manual trades or API issues), this
         method forces the internal state to match the broker's.
         """
-        log.info("--- Reconciling Master Portfolio State ---")
-        discrepancy_found = False
+        with self.lock:
+            log.info("--- Reconciling Master Portfolio State ---")
+            discrepancy_found = False
 
-        # --- Position Reconciliation ---
-        if self.positions != actual_positions:
-            discrepancy_found = True
-            log.warning("Position discrepancy found! Forcing update.")
-            log.warning(f"  Internal: {self.positions}")
-            log.warning(f"  Actual:   {actual_positions}")
-            self.positions = actual_positions
+            # --- Position Reconciliation ---
+            if self.positions != actual_positions:
+                discrepancy_found = True
+                log.warning("Position discrepancy found! Forcing update.")
 
-        # --- Cash Reconciliation ---
-        if abs(self.cash - actual_cash) > 0.01: # Use a small tolerance for float precision
-            discrepancy_found = True
-            log.warning("Cash discrepancy found! Forcing update.")
-            log.warning(f"  Internal: ${self.cash:,.2f}")
-            log.warning(f"  Actual:   ${actual_cash:,.2f}")
-            self.cash = actual_cash
+                # For cleaner logs, show only the positions of assets managed by the strategies.
+                internal_managed = {k: v for k, v in self.positions.items() if k in self.relevant_assets}
+                actual_managed = {k: v for k, v in actual_positions.items() if k in self.relevant_assets}
+                log.warning(f"  Internal (Managed Assets): {internal_managed if internal_managed else 'None'}")
+                log.warning(f"  Actual (Managed Assets):   {actual_managed if actual_managed else 'None'}")
 
-        if not discrepancy_found:
-            log.info("✅ Master portfolio is in sync with the broker.")
-        else:
-            log.info("Reconciliation forced an update to the master portfolio state.")
-        
-        log.info("--- Reconciliation Complete ---")
+                # The state update must use the full, unfiltered dictionary from the broker.
+                self.positions = actual_positions
+
+            # --- Cash Reconciliation ---
+            if abs(self.cash - actual_cash) > 0.01: # Use a small tolerance for float precision
+                discrepancy_found = True
+                log.warning("Cash discrepancy found! Forcing update.")
+                log.warning(f"  Internal: ${self.cash:,.2f}")
+                log.warning(f"  Actual:   ${actual_cash:,.2f}")
+                self.cash = actual_cash
+
+            if not discrepancy_found:
+                log.info("✅ Master portfolio is in sync with the broker.")
+            else:
+                log.info("Reconciliation forced an update to the master portfolio state.")
+            
+            log.info("--- Reconciliation Complete ---")
+
+            # --- NEW: Reconcile sub-portfolios against the updated master state ---
+            log.info("--- Reconciling Sub-Portfolios against Master State ---")
+            total_master_equity = self.get_total_equity()
+            any_sub_discrepancy = False
+
+            for sp in self.strategy_portfolios.values():
+                asset = sp.traded_asset
+                master_qty = self.positions.get(asset, 0.0)
+                sub_qty = sp.positions.get(asset, 0.0)
+
+                # Check for position discrepancy
+                if abs(master_qty - sub_qty) > 1e-9:
+                    any_sub_discrepancy = True
+                    log.warning(f"  -> Sub-portfolio discrepancy found for '{sp.strategy_name}' on asset {asset}!")
+                    log.warning(f"     Master Qty: {master_qty:.8f}, Sub-Portfolio Qty: {sub_qty:.8f}. Forcing update.")
+                    
+                    # 1. Correct the sub-portfolio's position
+                    if master_qty > 1e-9:
+                        sp.positions[asset] = master_qty
+                    elif asset in sp.positions:
+                        del sp.positions[asset]
+
+                    # 2. Recalculate the sub-portfolio's equity and cash based on its allocation
+                    strategy_config = self.strategy_configs.get(sp.strategy_name)
+                    cash_alloc_pct = strategy_config.get('cash_allocation_pct', 0) / 100.0
+
+                    new_sp_equity = total_master_equity * cash_alloc_pct
+                    position_value = master_qty * self.market_values.get(asset, 0)
+                    new_sp_cash = new_sp_equity - position_value
+
+                    log.warning(f"     Resetting '{sp.strategy_name}' equity to ${new_sp_equity:,.2f} and cash to ${new_sp_cash:,.2f}.")
+                    sp.equity = new_sp_equity
+                    sp.cash = new_sp_cash
+            
+            if not any_sub_discrepancy:
+                log.info("✅ All sub-portfolios are in sync with the master state.")

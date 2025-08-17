@@ -5,12 +5,12 @@ This is a robust, event-driven, and fully containerized algorithmic trading syst
 ## Key Features
 
 - **Multi-Strategy Engine**: Run multiple trading strategies simultaneously, each with its own allocated capital and isolated state.
-- **Live & Paper Trading**: Seamlessly switch between live trading (on Binance Testnet) and paper trading via a simple configuration setting.
+- **Live & Paper Trading**: Seamlessly switch between live and paper trading. Features advanced execution logic with pre-trade slippage estimation (from order book depth) and uses Limit-IOC orders to prevent sweeping the book on large trades.
 - **Dockerized Environment**: The entire application stack (trading bots, database) is managed with Docker Compose for easy, one-command setup and consistent deployments.
 - **Event-Driven Architecture**: Uses a real-time WebSocket stream for market data, making the system highly responsive to market events.
 - **Robust Data Handling**: Includes a dedicated data ingestion service that backfills historical data and ensures data integrity by checking for gaps.
-- **Comprehensive Backtesting**: A powerful backtesting engine to evaluate strategy performance over different periods (e.g., in-sample, out-of-sample).
-- **Real-Time Monitoring**: Generates a live HTML dashboard and individual reports for each running strategy, showing equity curves, trades, and performance metrics.
+- **Comprehensive Backtesting**: A powerful backtesting engine to evaluate strategy performance over different periods (e.g., in-sample, out-of-sample), generating detailed, interactive HTML reports for comparison.
+- **Real-Time Monitoring**: Generates a master HTML dashboard summarizing all strategies and detailed, auto-refreshing individual reports showing live equity curves, trades, and performance metrics.
 - **Modular & Extensible**: Easily add new strategies by creating a new strategy class and defining its parameters in a central YAML configuration file.
 
 ---
@@ -97,7 +97,7 @@ cd cqf-final-project
 
 ### 2. Create the Environment File
 
-The system needs your Binance Testnet API keys to run in live mode. Create a file named `.env` in the project root and add your keys.
+The system needs your Binance Testnet API keys to run in live mode. Create a file named `.env` in the project root and add your keys. You can generate them [here](https://testnet.binance.vision/).
 
 **File: `.env`**
 ```

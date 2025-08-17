@@ -106,11 +106,18 @@ class Backtest:
 
         # --- NEW: Conditionally generate individual report ---
         if results and self.backtest_config.get('generate_individual_reports', False):
-            self._generate_individual_report(signals_df, results)
-
+            report_path = self._generate_individual_report(signals_df, results)
+            results['Report Path'] = report_path
+        elif results:
+            # Ensure the key exists even if no report is generated
+            results['Report Path'] = None
+            
         return results
 
     def _run_simulation(self, signals_df: pd.DataFrame):
+        # Reset the equity curve to ensure it only contains data from this specific backtest run,
+        # preventing any initial values (e.g., from live trading mode) from polluting the chart.
+        self.portfolio_manager.equity_curve = []
         position = 0 # Simple state tracker: 0 for flat, 1 for in-position
         for i in range(len(signals_df)):
             timestamp = signals_df.index[i]
@@ -129,17 +136,17 @@ class Backtest:
                     
                     # Simulate fill details (slippage, commission)
                     commission_pct = self.system_config.get('commission_pct', 0.001)
-                    slippage_pct = self.system_config.get('paper_slippage_pct', 0.0005)
-                    fill_price = trade_price * (1 + slippage_pct)
+                    slippage_pct_config = self.system_config.get('paper_slippage_pct', 0.0005)
+                    fill_price = trade_price * (1 + slippage_pct_config)
                     trade_value = quantity * fill_price
                     commission = trade_value * commission_pct
                     trade_value_quote = trade_value + commission
 
                     # Call the master portfolio manager's on_fill method with all required arguments
                     self.portfolio_manager.on_fill(
-                        strategy_name=self.strategy.name,
-                        timestamp=timestamp, asset=self.asset, quantity=quantity,
-                        fill_price=fill_price, direction='BUY', trade_value_quote=trade_value_quote
+                        strategy_name=self.strategy.name, timestamp=timestamp, asset=self.asset, 
+                        quantity=quantity, fill_price=fill_price, direction='BUY', 
+                        trade_value_quote=trade_value_quote, slippage_pct=slippage_pct_config * 100
                     )
                     position = 1
             elif current_signal == -1 and position == 1:
@@ -148,16 +155,16 @@ class Backtest:
                 if quantity_to_sell > 0:
                     # Simulate fill details
                     commission_pct = self.system_config.get('commission_pct', 0.001)
-                    slippage_pct = self.system_config.get('paper_slippage_pct', 0.0005)
-                    fill_price = trade_price * (1 - slippage_pct)
+                    slippage_pct_config = self.system_config.get('paper_slippage_pct', 0.0005)
+                    fill_price = trade_price * (1 - slippage_pct_config)
                     trade_value = quantity_to_sell * fill_price
                     commission = trade_value * commission_pct
                     trade_value_quote = trade_value - commission
 
                     self.portfolio_manager.on_fill(
-                        strategy_name=self.strategy.name,
-                        timestamp=timestamp, asset=self.asset, quantity=quantity_to_sell,
-                        fill_price=fill_price, direction='SELL', trade_value_quote=trade_value_quote
+                        strategy_name=self.strategy.name, timestamp=timestamp, asset=self.asset, 
+                        quantity=quantity_to_sell, fill_price=fill_price, direction='SELL', 
+                        trade_value_quote=trade_value_quote, slippage_pct=slippage_pct_config * 100
                     )
                     position = 0
 
@@ -198,6 +205,8 @@ class Backtest:
         
         return {
             'Strategy Name': self.strategy.name,
+            'Asset': self.asset,
+            'Timeframe': self.timeframe,
             'Total Return %': total_return_pct,
             'Max Drawdown %': max_drawdown_pct,
             'Sharpe Ratio': sharpe_ratio,
@@ -230,7 +239,16 @@ class Backtest:
         fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05,
                             subplot_titles=('Portfolio Equity Over Time', 'Portfolio Drawdown', 'Price and Executed Trades'))
 
-        fig.add_trace(go.Scatter(x=results['Equity Curve'].index, y=results['Equity Curve']['Equity'], name='Equity', line=dict(color='cyan')), row=1, col=1)
+        # --- Plot 1: Equity Curve ---
+        equity_curve_df = results['Equity Curve']
+        initial_equity = self.portfolio_manager.initial_cash
+
+        # Plot the actual portfolio equity over time
+        fig.add_trace(go.Scatter(
+            x=equity_curve_df.index, y=equity_curve_df['Equity'],
+            name='Portfolio Equity', line=dict(color='deepskyblue')
+        ), row=1, col=1)
+
         fig.add_trace(go.Scatter(x=results['Drawdown Curve'].index, y=results['Drawdown Curve'] * 100, name='Drawdown', fill='tozeroy', line=dict(color='red')), row=2, col=1)
         fig.add_trace(go.Scatter(x=signals_df.index, y=signals_df['Close'], name='Close Price', line=dict(color='gray', width=1)), row=3, col=1)
         
@@ -252,7 +270,7 @@ class Backtest:
         <html><head><title>Backtest Report: {self.strategy.name}</title>
         <style> body {{ font-family: 'Arial', sans-serif; background-color: #111; color: #eee; }} h1, h2 {{ color: #44aaff; border-bottom: 2px solid #44aaff; }} table {{ border-collapse: collapse; width: 50%; margin: 20px 0; }} th, td {{ border: 1px solid #444; padding: 8px; text-align: left; }} th {{ background-color: #222; }} </style></head>
         <body><h1>Backtest Report: {self.strategy.name}</h1>
-        <h2>Period: {self.start_date.strftime('%Y-%m-%d')} to {self.end_date.strftime('%Y-%m-%d')} ({self.period.replace('_', ' ').title()})</h2>"""
+        <h2>Asset: {self.asset} | Timeframe: {self.timeframe} | Period: {self.start_date.strftime('%Y-%m-%d')} to {self.end_date.strftime('%Y-%m-%d')} ({self.period.replace('_', ' ').title()})</h2>"""
         for category, data in metrics_data.items():
             html_content += f"<h3>{category}</h3><table>"
             for key, value in data.items(): html_content += f"<tr><th>{key}</th><td>{value}</td></tr>"
@@ -262,6 +280,7 @@ class Backtest:
         
         with open(html_path, 'w') as f: f.write(html_content)
         log.info(f"Individual HTML report saved to {html_path}")
+        return html_path
 
 def generate_comparison_report(all_results: list, backtest_config: dict, period: str):
     if not all_results:
@@ -269,25 +288,39 @@ def generate_comparison_report(all_results: list, backtest_config: dict, period:
         return
 
     log.info("Generating strategy comparison report...")
-    summary_df = pd.DataFrame([{
-        'Strategy': r['Strategy Name'],
-        'Total Return %': f"{r['Total Return %']:.2f}",
-        'Max Drawdown %': f"{r['Max Drawdown %']:.2f}",
-        'Sharpe Ratio': f"{r['Sharpe Ratio']:.2f}",
-        'Total Trades': r['Total Trades'],
-        'Total P&L $': f"${r['Total P&L $']:,.2f}"
-    } for r in all_results])
+    summary_data = []
+    for r in all_results:
+        report_path = r.get('Report Path')
+        report_link = 'N/A'
+        if report_path:
+            report_filename = os.path.basename(report_path)
+            report_link = f'<a href="{report_filename}" target="_blank">View</a>'
 
+        summary_data.append({
+            'Strategy': r['Strategy Name'],
+            'Asset': r['Asset'],
+            'Timeframe': r['Timeframe'],
+            'Total Return %': f"{r['Total Return %']:.2f}",
+            'Max Drawdown %': f"{r['Max Drawdown %']:.2f}",
+            'Sharpe Ratio': f"{r['Sharpe Ratio']:.2f}",
+            'Total Trades': r['Total Trades'],
+            'Total P&L $': f"${r['Total P&L $']:,.2f}",
+            'Report': report_link
+        })
+    summary_df = pd.DataFrame(summary_data)
+    
+    # --- Equity Curve Comparison Chart ---
     fig_equity = go.Figure()
     for r in all_results: fig_equity.add_trace(go.Scatter(x=r['Equity Curve'].index, y=r['Equity Curve']['Equity'], name=r['Strategy Name']))
-    fig_equity.update_layout(title_text='Equity Curve Comparison', template='plotly_dark')
+    fig_equity.update_layout(title_text='Equity Curve Comparison', template='plotly_dark', margin=dict(l=10, r=10, t=40, b=10))
 
+    # --- Key Metrics Bar Chart Comparison ---
     fig_bars = make_subplots(rows=1, cols=3, subplot_titles=('Total Return %', 'Max Drawdown %', 'Sharpe Ratio'))
     names = [r['Strategy Name'] for r in all_results]
     fig_bars.add_trace(go.Bar(x=names, y=[r['Total Return %'] for r in all_results], name='Return'), row=1, col=1)
     fig_bars.add_trace(go.Bar(x=names, y=[r['Max Drawdown %'] for r in all_results], name='Drawdown'), row=1, col=2)
     fig_bars.add_trace(go.Bar(x=names, y=[r['Sharpe Ratio'] for r in all_results], name='Sharpe'), row=1, col=3)
-    fig_bars.update_layout(title_text='Key Metric Comparison', template='plotly_dark', showlegend=False)
+    fig_bars.update_layout(title_text='Key Metric Comparison', template='plotly_dark', showlegend=False, margin=dict(l=10, r=10, t=40, b=10))
 
     execution_time = datetime.now()
     start_date_str = backtest_config['periods'][period]['start_date'].split('T')[0]
@@ -295,20 +328,47 @@ def generate_comparison_report(all_results: list, backtest_config: dict, period:
     report_timestamp = execution_time.strftime('%Y%m%d_%H%M%S')
     html_path = os.path.join(OUTPUT_DIR, f"comparison_report_{period}_{report_timestamp}.html")
 
+    # --- Performance Summary Table ---
+    # Convert the DataFrame to an HTML table string with a specific class for styling.
+    summary_table_html = summary_df.to_html(escape=False, index=False, classes='styled-table')
+
+    # --- Assemble the HTML Report ---
     html_content = f"""
     <html><head><title>Strategy Comparison Report ({period.replace('_', ' ').title()})</title>
-    <style> body {{ font-family: 'Arial', sans-serif; background-color: #111; color: #eee; }} h1, h2 {{ color: #44aaff; border-bottom: 2px solid #44aaff; }} table {{ border-collapse: collapse; width: 80%; margin: 20px auto; }} th, td {{ border: 1px solid #444; padding: 10px; text-align: left; }} th {{ background-color: #222; }} </style></head>
-    <body><h1>Strategy Comparison Report ({period.replace('_', ' ').title()})</h1>
-    <h2>Executed on: {execution_time.strftime('%Y-%m-%d %H:%M:%S')}</h2>
-    <h2>Period: {start_date_str} to {end_date_str}</h2>"""
-    
-    fig_table = go.Figure(data=[go.Table(header=dict(values=list(summary_df.columns), fill_color='#222', align='left', font=dict(color='white')),
-                                        cells=dict(values=[summary_df[col] for col in summary_df.columns], fill_color='#111', align='left', font=dict(color='white')))])
-    fig_table.update_layout(template='plotly_dark', title_text='Performance Summary')
-    html_content += fig_table.to_html(full_html=False, include_plotlyjs='cdn')
-    html_content += fig_equity.to_html(full_html=False, include_plotlyjs=False)
-    html_content += fig_bars.to_html(full_html=False, include_plotlyjs=False)
-    html_content += "</body></html>"
+    <style>
+        body {{ font-family: 'Arial', sans-serif; background-color: #111; color: #eee; margin: 20px; }}
+        h1, h2 {{ color: #44aaff; border-bottom: 1px solid #44aaff; padding-bottom: 8px; font-weight: 300; }}
+        h2 {{ font-size: 1.2em; color: #bbb; border-bottom: none; }}
+        .report-container {{ display: flex; flex-direction: column; gap: 20px; }}
+        .chart-container {{ display: flex; flex-direction: row; flex-wrap: wrap; gap: 20px; }}
+        .chart-item {{ flex: 1; min-width: 500px; }}
+        /* Table Styles */
+        .styled-table {{ border-collapse: collapse; width: 100%; margin-top: 10px; font-size: 0.9em; }}
+        .styled-table thead tr {{ background-color: #2a3f5f; color: #ffffff; text-align: left; }}
+        .styled-table th, .styled-table td {{ padding: 12px 15px; border: 1px solid #333; }}
+        .styled-table tbody tr {{ border-bottom: 1px solid #333; }}
+        .styled-table tbody tr:nth-of-type(even) {{ background-color: #1e2a3a; }}
+        .styled-table tbody tr:hover {{ background-color: #2c3e50; }}
+        .styled-table a {{ color: #44aaff; font-weight: bold; text-decoration: none; }}
+        .styled-table a:hover {{ text-decoration: underline; }}
+    </style></head>
+    <body>
+    <div class="report-container">
+        <div>
+            <h1>Strategy Comparison Report ({period.replace('_', ' ').title()})</h1>
+            <h2>Executed on: {execution_time.strftime('%Y-%m-%d %H:%M:%S')} | Period: {start_date_str} to {end_date_str}</h2>
+        </div>
+        <div>
+            <h3>Performance Summary</h3>
+            {summary_table_html}
+        </div>
+        <div class="chart-container">
+            <div class="chart-item">{fig_equity.to_html(full_html=False, include_plotlyjs='cdn')}</div>
+            <div class="chart-item">{fig_bars.to_html(full_html=False, include_plotlyjs=False)}</div>
+        </div>
+    </div>
+    </body></html>
+    """
     
     with open(html_path, 'w') as f: f.write(html_content)
     log.info(f"Strategy comparison report saved to {html_path}")

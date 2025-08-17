@@ -83,7 +83,7 @@ services:
     build:
       context: .
       dockerfile: backtester.Dockerfile
-    command: ["python", "trading_system/backtest.py"]
+    entrypoint: ["python", "trading_system/backtest.py"]
     environment:
       - DB_USER=trading_user
       - DB_PASSWORD=a_secure_password

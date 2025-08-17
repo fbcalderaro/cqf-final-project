@@ -307,16 +307,21 @@ def process_new_bar(strategy, strategy_state, resampler, current_price, portfoli
             order_response = execution_handler.place_order(asset, 'MARKET', quantity, 'BUY', current_price)
             if order_response and order_response.get('success'):
                 fill_data = order_response['data']
-                # The master portfolio manager handles the state update for both the master account
-                # and the specific strategy's sub-portfolio.
+
+                # --- NEW: Calculate slippage ---
+                # Slippage is the difference between the intended price and the actual fill price.
+                fill_price = fill_data['fill_price']
+                slippage_pct = ((fill_price - current_price) / current_price) * 100 if current_price > 0 else 0.0
+
                 portfolio_manager.on_fill(
                     strategy_name=strategy.name,
                     timestamp=datetime.now(timezone.utc), 
                     asset=asset, 
                     quantity=fill_data['filled_quantity'], 
-                    fill_price=fill_data['fill_price'], 
+                    fill_price=fill_price, 
                     direction='BUY',
-                    trade_value_quote=fill_data['trade_value_quote']
+                    trade_value_quote=fill_data['trade_value_quote'],
+                    slippage_pct=slippage_pct
                 )
                 strategy_state['state'] = TradingState.IN_POSITION
             else:
@@ -331,14 +336,20 @@ def process_new_bar(strategy, strategy_state, resampler, current_price, portfoli
             if order_response and order_response.get('success'):
                 fill_data = order_response['data']
                 log.info(f"[{strategy.name}] SELL order fill confirmed by execution handler.")
+
+                # --- NEW: Calculate slippage ---
+                fill_price = fill_data['fill_price']
+                slippage_pct = ((current_price - fill_price) / current_price) * 100 if current_price > 0 else 0.0
+
                 portfolio_manager.on_fill(
                     strategy_name=strategy.name,
                     timestamp=datetime.now(timezone.utc),
                     asset=asset,
                     quantity=fill_data['filled_quantity'],
-                    fill_price=fill_data['fill_price'],
+                    fill_price=fill_price,
                     direction='SELL',
-                    trade_value_quote=fill_data['trade_value_quote']
+                    trade_value_quote=fill_data['trade_value_quote'],
+                    slippage_pct=slippage_pct
                 )
                 strategy_state['state'] = TradingState.SEARCHING
             else:

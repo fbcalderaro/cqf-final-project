@@ -134,7 +134,8 @@ class StrategyMonitor:
             height=800,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             yaxis_fixedrange=False,  # Ensure equity curve y-axis is zoomable
-            yaxis2_fixedrange=False  # Ensure price chart y-axis is zoomable
+            yaxis2_fixedrange=False,  # Ensure price chart y-axis is zoomable
+            xaxis2_rangeslider_visible=False # Hide the horizontal zoom bar
         )
         return fig
 
@@ -156,6 +157,7 @@ class StrategyMonitor:
             'timeframe': self.timeframe,
             'last_update': datetime.now(timezone.utc).isoformat(),
             'strategy_state': strategy_state,
+            'initial_equity': self.sp.initial_equity,
             'total_equity': total_equity,
             'pnl': pnl,
             'pnl_pct': pnl_pct,
@@ -204,6 +206,10 @@ class StrategyMonitor:
             for trade in reversed(self.sp.trade_log[-50:]):
                 ts = trade['timestamp'].strftime('%Y-%m-%d %H:%M:%S')
                 direction_color = 'lime' if trade['direction'] == 'BUY' else 'magenta'
+                
+                slippage_pct = trade.get('slippage_pct', 0.0)
+                # Positive slippage is bad (paid more on buy, got less on sell). Color it accordingly.
+                slippage_color = '#ff6666' if slippage_pct > 0.001 else '#aaffaa'
                 trade_log_html_rows += f"""
                     <tr>
                         <td>{ts}</td>
@@ -211,7 +217,7 @@ class StrategyMonitor:
                         <td style="color: {direction_color}; font-weight: bold;">{trade['direction']}</td>
                         <td>{trade['quantity']:.8f}</td>
                         <td>${trade['price']:,.2f}</td>
-                        <td>${trade['commission']:,.4f}</td>
+                        <td style="color: {slippage_color};">{slippage_pct:+.4f}%</td>
                     </tr>
                 """
 
@@ -254,7 +260,7 @@ class StrategyMonitor:
                         <th>Direction</th>
                         <th>Quantity</th>
                         <th>Price</th>
-                        <th>Commission</th>
+                        <th>Slippage %</th>
                     </tr>
                 </thead>
                 <tbody>
